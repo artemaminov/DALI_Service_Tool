@@ -39,6 +39,12 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
 .scene-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .scene-chip{padding:4px 7px;border:1px solid #303a47;border-radius:6px;font-size:11px;color:#b8c1cd}
 .expand-btn{min-width:34px;padding-left:10px;padding-right:10px}
+.tc{display:inline-flex;align-items:center;gap:7px;margin-left:8px;vertical-align:middle}
+.tc input[type=range]{-webkit-appearance:none;appearance:none;width:130px;height:6px;padding:0;border:0;border-radius:99px;background:linear-gradient(90deg,#9ccaff,#f4f1ea,#ffb35c);cursor:pointer}
+.tc input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#e9edf3;border:2px solid #232a34;box-shadow:0 0 0 1px #59657780}
+.tc input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#e9edf3;border:2px solid #232a34}
+.tc input[type=range]:disabled{opacity:.45;cursor:not-allowed}
+.tc .tc-k{min-width:52px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 @media(max-width:900px){.device-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}
 
 @media(max-width:760px){.grid{grid-template-columns:1fr}.full{grid-column:auto}table{display:block;overflow:auto}}
@@ -160,6 +166,14 @@ let lastLog = "";
 const selectedSAs = new Set();
 const expandedSAs = new Set();
 const autoExpandAfterInspect = new Set();
+
+// Colour temperature slider state. Values are in mirek (1e6 / Kelvin):
+// small mirek = cold (left), large mirek = warm (right).
+const TC_DEFAULT_COOLEST = 154; // 6500 K, used until Inspect reads the gear limits
+const TC_DEFAULT_WARMEST = 370; // 2700 K
+const tcValues = new Map();     // SA -> last mirek chosen in the UI
+let tcDragging = false;         // pause table re-render while a slider is being moved
+document.addEventListener("pointerup", () => { tcDragging = false; });
 
 const tooltip = document.getElementById("tooltip");
 
@@ -378,15 +392,66 @@ function detailCard(d){
       <div class="device-field"><span class="k">Power failure flag</span><span class="v">${yesNo(d.powerFailure)}</span></div>
       <div class="device-field"><span class="k">Groups</span><span class="v">${d.groups}</span></div>
       <div class="device-field"><span class="k">Status</span><span class="v">${statusText(d)}</span></div>
+
+      <div class="device-field"><span class="k">Colour temperature</span><span class="v">${tcText(d.tc)}</span></div>
+      <div class="device-field"><span class="k">Tc coolest</span><span class="v">${tcText(d.tcCoolest)}</span></div>
+      <div class="device-field"><span class="k">Tc warmest</span><span class="v">${tcText(d.tcWarmest)}</span></div>
     </div>
     <div style="margin-top:15px">
       <div class="small muted">Scenes 0–15 <span class="help" data-tip="Scene value is the stored arc level for that DALI scene. MASK means the scene is not programmed.">?</span></div>
       <div class="scene-list">${sceneHtml(d.scenes)}</div>
     </div>
     <div class="small muted" style="margin-top:14px">
-      DT8 colour-temperature capabilities and Memory Bank 0 identity are not decoded in this build yet.
+      Colour temperature is shown only for DT8 gear. Memory Bank 0 identity is not decoded in this build yet.
     </div>
   </div>`;
+}
+
+function validMirek(v){
+  return Number.isInteger(v) && v > 0 && v < 0xFFFF;
+}
+
+function kelvin(mirek){
+  return Math.round(1e6 / mirek / 10) * 10;
+}
+
+function tcRange(d){
+  const cool = validMirek(d.tcCoolest) ? d.tcCoolest : TC_DEFAULT_COOLEST;
+  const warm = validMirek(d.tcWarmest) ? d.tcWarmest : TC_DEFAULT_WARMEST;
+  return cool < warm ? [cool, warm] : [TC_DEFAULT_COOLEST, TC_DEFAULT_WARMEST];
+}
+
+function tcControl(d){
+  const [cool, warm] = tcRange(d);
+  let m = tcValues.has(d.sa) ? tcValues.get(d.sa) : (validMirek(d.tc) ? d.tc : Math.round((cool + warm) / 2));
+  m = Math.min(warm, Math.max(cool, m));
+  return `<span class="tc">
+      <input class="op" type="range" min="${cool}" max="${warm}" value="${m}"
+        aria-label="Colour temperature SA${d.sa}"
+        onpointerdown="tcDragging=true"
+        oninput="tcInput(${d.sa},this)"
+        onchange="tcCommit(${d.sa},this)">
+      <span class="tc-k" id="tcLabel${d.sa}">${kelvin(m)} K</span>
+      <span class="help" data-tip="Colour temperature (DALI DT8), cold on the left, warm on the right. The range is ${kelvin(cool)}–${kelvin(warm)} K${validMirek(d.tcCoolest) ? " as reported by the gear" : " by default; Inspect reads the real limits of DT8 gear"}. Gear without DT8 ignores the command.">?</span>
+    </span>`;
+}
+
+function tcInput(sa, el){
+  tcDragging = true;
+  const label = document.getElementById("tcLabel"+sa);
+  if(label) label.textContent = kelvin(Number(el.value)) + " K";
+}
+
+function tcCommit(sa, el){
+  tcDragging = false;
+  const mirek = Number(el.value);
+  tcValues.set(sa, mirek);
+  start("/api/device?sa="+sa+"&cmd=tc&mirek="+mirek);
+}
+
+function tcText(v){
+  if(v===0xFFFF) return "MASK";
+  return validMirek(v) ? `${kelvin(v)} K (${v} mirek)` : "—";
 }
 
 function renderDevices(ds){
@@ -418,6 +483,7 @@ function renderDevices(ds){
         <button onclick="deviceAction(${d.sa},'identify')">Identify <span class="help" data-tip="Flashes this addressed luminaire three times so you can match its physical location to its short address.">?</span></button>
         <button onclick="deviceAction(${d.sa},'off')">Off</button>
         <button onclick="deviceAction(${d.sa},'on')">On</button>
+        ${tcControl(d)}
         <button id="expandBtn${d.sa}" class="expand-btn" onclick="toggleDeviceCard(${d.sa})">${expandedSAs.has(d.sa)?"▴":"▾"}</button>
       </td>`;
     tb.appendChild(tr);
@@ -443,7 +509,7 @@ async function refresh(){
     document.getElementById("opText").textContent=s.operation+" · "+s.progress+"%";
     document.getElementById("progressBar").style.width=s.progress+"%";
     document.getElementById("lastResult").textContent=s.lastResult||"";
-    renderDevices(s.devices);
+    if(!tcDragging) renderDevices(s.devices);
 
     if(s.log!==lastLog){
       const el=document.getElementById("log");

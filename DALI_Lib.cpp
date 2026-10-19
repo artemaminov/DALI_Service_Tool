@@ -792,6 +792,36 @@ uint8_t Dali::set_dtr2(uint8_t value, uint8_t adr)
     return 1;
 }
 
+//======================================================================
+// DT8 colour control (IEC62386-209)
+//======================================================================
+// ENABLE DEVICE TYPE 8 is only valid for the very next command, so it is sent
+// immediately before every DT8 application extended command.
+
+void Dali::set_colour_temperature(uint16_t mirek, uint8_t adr)
+{
+    cmd(DALI_DATA_TRANSFER_REGISTER0, mirek & 0xFF);
+    cmd(DALI_DATA_TRANSFER_REGISTER1, mirek >> 8);
+    cmd(DALI_ENABLE_DEVICE_TYPE_X, 8);
+    cmd(DALI_DT8_SET_TEMPORARY_COLOUR_TEMPERATURE, adr);
+    cmd(DALI_ENABLE_DEVICE_TYPE_X, 8);
+    cmd(DALI_DT8_ACTIVATE, adr);
+}
+
+int32_t Dali::query_colour_value(uint8_t selector, uint8_t adr)
+{
+    if (set_dtr0(selector, adr))
+        return -DALI_RESULT_NO_REPLY;
+    cmd(DALI_ENABLE_DEVICE_TYPE_X, 8);
+    int16_t msb = cmd(DALI_DT8_QUERY_COLOUR_VALUE, adr);
+    if (msb < 0)
+        return msb;
+    int16_t lsb = cmd(DALI_QUERY_CONTENT_DTR0, adr); // gear placed the LSB in DTR0
+    if (lsb < 0)
+        return lsb;
+    return ((uint16_t)msb << 8) | (uint8_t)lsb;
+}
+
 uint8_t Dali::read_memory_bank(uint8_t bank, uint8_t adr)
 {
     uint16_t rv;

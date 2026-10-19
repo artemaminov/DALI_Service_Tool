@@ -101,6 +101,11 @@ struct DeviceInfo {
   int16_t powerFailure = -999;
   int16_t nextDeviceType = -999;
 
+  // DT8 colour temperature in mirek (1e6 / Kelvin). 0xFFFF means MASK / unknown.
+  int32_t tc = -999;
+  int32_t tcCoolest = -999;
+  int32_t tcWarmest = -999;
+
   // 16 scene levels. 0xFF means MASK / scene not programmed.
   int16_t scenes[16] = {
     -999,-999,-999,-999,-999,-999,-999,-999,
@@ -135,13 +140,15 @@ enum OpType {
   OP_SELECTED_ON,
   OP_SELECTED_OFF,
   OP_BROADCAST_ON,
-  OP_BROADCAST_OFF
+  OP_BROADCAST_OFF,
+  OP_SET_TC
 };
 
 struct PendingOp {
   OpType type = OP_NONE;
   int sa = -1;
   uint64_t mask = 0;
+  int value = 0;
 };
 
 PendingOp pendingOp;
@@ -727,6 +734,11 @@ void inspectDevice(int sa) {
     progressPct = 55 + (uint8_t)(((i + 1) * 40) / 16);
   }
 
+  // DT8 colour temperature. Gear without DT8 does not answer and keeps -101.
+  d.tc = dali.query_colour_value(DALI_DT8_SELECTOR_TC, sa); delay(20);
+  d.tcCoolest = dali.query_colour_value(DALI_DT8_SELECTOR_TC_COOLEST, sa); delay(20);
+  d.tcWarmest = dali.query_colour_value(DALI_DT8_SELECTOR_TC_WARMEST, sa); delay(20);
+
   d.inspected = true;
   devices[sa] = d;
 
@@ -736,7 +748,10 @@ void inspectDevice(int sa) {
          " max=" + String(d.maxLevel) +
          " physicalMin=" + String(d.physicalMin) +
          " type=" + String(d.deviceType) +
-         " nextType=" + String(d.nextDeviceType));
+         " nextType=" + String(d.nextDeviceType) +
+         " tc=" + String(d.tc) +
+         " tcCoolest=" + String(d.tcCoolest) +
+         " tcWarmest=" + String(d.tcWarmest));
 
   finishOperation("Inspect complete for SA" + String(sa));
 }
@@ -765,6 +780,15 @@ void setDeviceLevel(int sa, uint8_t level) {
   finishOperation("SA" + String(sa) + (level ? " ON" : " OFF"));
 }
 
+
+void setDeviceTc(int sa, uint16_t mirek) {
+  setOperation("Colour temperature SA" + String(sa));
+  dali.set_colour_temperature(mirek, (uint8_t)sa);
+  devices[sa].tc = mirek;
+  addLog("SA" + String(sa) + " Tc -> " + String(mirek) + " mirek (" +
+         String(1000000UL / mirek) + " K)");
+  finishOperation("SA" + String(sa) + " colour temperature " + String(1000000UL / mirek) + " K");
+}
 
 void setSelectedLevel(uint64_t mask, uint8_t level) {
   setOperation(level ? "Selected ON" : "Selected OFF");
@@ -921,6 +945,7 @@ void operationTask(void* parameter) {
     case OP_SELECTED_OFF:      setSelectedLevel(op.mask, 0); break;
     case OP_BROADCAST_ON:      setBroadcastLevel(200); break;
     case OP_BROADCAST_OFF:     setBroadcastLevel(0); break;
+    case OP_SET_TC:            setDeviceTc(op.sa, (uint16_t)op.value); break;
     default:
       finishOperation("No operation");
       break;
@@ -929,7 +954,7 @@ void operationTask(void* parameter) {
   vTaskDelete(nullptr);
 }
 
-bool startOperation(OpType type, int sa = -1, uint64_t mask = 0) {
+bool startOperation(OpType type, int sa = -1, uint64_t mask = 0, int value = 0) {
   if (busy) return false;
 
   busy = true;
@@ -937,6 +962,7 @@ bool startOperation(OpType type, int sa = -1, uint64_t mask = 0) {
   pendingOp.type = type;
   pendingOp.sa = sa;
   pendingOp.mask = mask;
+  pendingOp.value = value;
 
   BaseType_t ok = xTaskCreate(
     operationTask,
@@ -1041,6 +1067,7 @@ void handleState() {
     j += ",\"groups\":\"" + groupsString(d.groups07, d.groups815) + "\"";
     j += ",\"replyValid\":"; j += d.replyValid ? "true" : "false";
     j += ",\"inspected\":"; j += d.inspected ? "true" : "false";
+    j += ",\"tc\":" + String(d.tc);
 
     if (d.inspected) {
       j += ",\"physicalMin\":" + String(d.physicalMin);
@@ -1057,6 +1084,8 @@ void handleState() {
       j += ",\"resetState\":" + String(d.resetState);
       j += ",\"powerFailure\":" + String(d.powerFailure);
       j += ",\"nextDeviceType\":" + String(d.nextDeviceType);
+      j += ",\"tcCoolest\":" + String(d.tcCoolest);
+      j += ",\"tcWarmest\":" + String(d.tcWarmest);
       j += ",\"scenes\":[";
       for (int si = 0; si < 16; si++) {
         if (si) j += ",";
@@ -1155,6 +1184,12 @@ void setupHttp() {
     else if (cmd == "inspect") sendBusyOrStarted(startOperation(OP_INSPECT, sa));
     else if (cmd == "on") sendBusyOrStarted(startOperation(OP_ON, sa));
     else if (cmd == "off") sendBusyOrStarted(startOperation(OP_OFF, sa));
+    else if (cmd == "tc") {
+      // Colour temperature in mirek: 100..1000 mirek = 10000..1000 K
+      int mirek = server.hasArg("mirek") ? server.arg("mirek").toInt() : 0;
+      if (mirek < 100 || mirek > 1000) return server.send(400, "text/plain", "mirek must be 100..1000");
+      sendBusyOrStarted(startOperation(OP_SET_TC, sa, 0, mirek));
+    }
     else server.send(400, "text/plain", "Unknown cmd");
   });
 

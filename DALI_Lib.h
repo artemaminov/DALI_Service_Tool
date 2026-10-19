@@ -85,6 +85,10 @@ public:
   uint8_t set_dtr0(uint8_t value, uint8_t adr);
   uint8_t set_dtr1(uint8_t value, uint8_t adr);
   uint8_t set_dtr2(uint8_t value, uint8_t adr);
+
+  //DT8 colour control (IEC62386-209)
+  void     set_colour_temperature(uint16_t mirek, uint8_t adr); //set and activate colour temperature Tc in mirek
+  int32_t  query_colour_value(uint8_t selector, uint8_t adr); //returns 16-bit value (0xFFFF = MASK/unknown) or negative DALI_RESULT_xxx
       
   //commissioning
   uint8_t  commission(uint8_t init_arg=0xff);
@@ -426,6 +430,15 @@ private:
 #define DALI_QUERY_SHORT_ADDRESS 0x01BB //269  - What is the short address of the slaveNote 2being selected?
 #define DALI_PHYSICAL_SELECTION 0x01BD //270 not DALI-2 - Sets the slave to Physical Selection Mode and excludes the slave from the Compare process. (Excluding IEC62386-102ed2.0) (Command that exist only in IEC62386-102ed1.0, -207ed1.0)
 #define DALI_RESERVED271 0x01BF //271  - [Reserved]
+//DT8 (IEC62386-209) application extended commands: each must directly follow ENABLE DEVICE TYPE 8
+#define DALI_DT8_ACTIVATE 226 //226 DT8 - Applies the temporary colour settings.
+#define DALI_DT8_SET_TEMPORARY_COLOUR_TEMPERATURE 231 //231 DT8 - Stores DTR1:DTR0 (mirek) as temporary colour temperature Tc.
+#define DALI_DT8_QUERY_COLOUR_VALUE 250 //250 DT8 - Returns MSB of the value selected by DTR0, LSB is placed in DTR0.
+//QUERY COLOUR VALUE selectors (DTR0)
+#define DALI_DT8_SELECTOR_TC 2           //current colour temperature Tc
+#define DALI_DT8_SELECTOR_TC_COOLEST 128 //coolest Tc limit
+#define DALI_DT8_SELECTOR_TC_WARMEST 130 //warmest Tc limit
+
 #define DALI_ENABLE_DEVICE_TYPE_X 0x01C1 //272  - Adds the device XXXX (a special device).
 #define DALI_DATA_TRANSFER_REGISTER1 0x01C3 //273  - Stores data XXXX into DTR1.
 #define DALI_DATA_TRANSFER_REGISTER2 0x01C5 //274  - Stores data XXXX into DTR2.
