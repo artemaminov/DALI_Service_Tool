@@ -102,6 +102,7 @@ void IRAM_ATTR Dali::timer()
             break;
         }
         // set busstate = RX
+        diag_rx_starts++;
         rxpos = 0;
         rxbitcnt = 0;
         rxidle = 0;
@@ -134,6 +135,9 @@ void IRAM_ATTR Dali::timer()
         }
         break;
     case TX:
+        diag_tx_samples++;
+        if (!busishigh)
+            diag_tx_low_samples++;
         if (txhbcnt >= txhblen) {
             // all bits transmitted, go back to IDLE
             _set_busstate_idle();

@@ -236,6 +236,26 @@ int firstFreeShortAddress(const bool used[64]) {
 // DALI helpers
 // ============================================================
 
+void resetRxDiag() {
+  dali.diag_tx_samples = 0;
+  dali.diag_tx_low_samples = 0;
+  dali.diag_rx_starts = 0;
+}
+
+// While transmitting, the RX pin must echo our own frame: a 16-bit forward frame has
+// 17 low half-bits out of 38 (start + one per data bit; stop bits are high) = ~45%.
+// No echo means RX does not see the bus at all: wrong pin, inverted level or hardware.
+String rxDiagLine() {
+  uint32_t tx = dali.diag_tx_samples;
+  uint32_t low = dali.diag_tx_low_samples;
+  uint32_t pct = tx ? (low * 100 / tx) : 0;
+  String s = "RX DIAG: TX samples=" + String(tx) +
+             ", RX low during TX=" + String(low) + " (" + String(pct) + "%, expect ~45%)" +
+             ", RX starts while idle=" + String(dali.diag_rx_starts) +
+             ", RX pin now=" + String(bus_is_high());
+  return s;
+}
+
 void readDevice(int sa, bool detailed) {
   DeviceInfo d;
   d.status = dali.cmd(DALI_QUERY_STATUS, sa);
@@ -265,6 +285,7 @@ void readDevice(int sa, bool detailed) {
 int scanBus(bool detailed, bool finalize = true) {
   setOperation(detailed ? "Detailed scan" : "Scan");
   clearDeviceTable();
+  resetRxDiag();
   addLog(detailed ? "Detailed scan SA0..SA63" : "Scan SA0..SA63");
 
   String report = "DALI SERVICE TOOL REPORT\n";
@@ -304,6 +325,8 @@ int scanBus(bool detailed, bool finalize = true) {
     delay(10);
   }
 
+  addLog(rxDiagLine());
+  report += rxDiagLine() + "\n";
   report += "\nFound: " + String(found) + "\n";
   lastReport = report;
   if (finalize) finishOperation("Scan complete. Found " + String(found) + " device(s)");
@@ -600,6 +623,7 @@ void readdressSingle(int newSa) {
 
 void rawCompare20() {
   setOperation("RAW COMPARE x20");
+  resetRxDiag();
 
   addLog("INITIALISE 0xFF");
   dali.cmd(DALI_INITIALISE, 0xFF);
@@ -642,6 +666,8 @@ void rawCompare20() {
 
   dali.cmd(DALI_TERMINATE, 0x00);
 
+  addLog(rxDiagLine());
+  report += rxDiagLine() + "\n";
   report += "\nYES=" + String(yes);
   report += "\nNO_REPLY=" + String(noReply);
   report += "\nINVALID=" + String(invalid);

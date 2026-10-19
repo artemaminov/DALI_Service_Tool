@@ -63,6 +63,11 @@ public:
   uint8_t txcollisionhandling; //collision handling DALI_TX_COLLISSION_AUTO,DALI_TX_COLLISSION_OFF,DALI_TX_COLLISSION_ON
   uint32_t milli(); //esp32 as 32-bit controller needs millis to be 32-bit to rollover correctly
   Dali() : txcollisionhandling(DALI_TX_COLLISSION_AUTO), busstate(0), /* ticks(0), _milli(0), */ idlecnt(0) {}; //initialize variables
+
+  //RX diagnostics (updated by timer(), reset by caller)
+  volatile uint32_t diag_tx_samples = 0;     //samples taken while transmitting
+  volatile uint32_t diag_tx_low_samples = 0; //of those, samples where RX saw the bus low (echo of own frame)
+  volatile uint32_t diag_rx_starts = 0;      //receptions started by a low bus while idle
   
   //-------------------------------------------------
   //HIGH LEVEL PUBLIC
