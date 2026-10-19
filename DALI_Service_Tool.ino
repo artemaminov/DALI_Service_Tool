@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include "hal/gpio_ll.h"
+#include "soc/gpio_struct.h"
 #include "DALI_Lib.h"
 #include "web_page.h"
 
@@ -49,16 +51,18 @@ WebServer server(80);
 // DALI hardware callbacks
 // ============================================================
 
-uint8_t bus_is_high() {
-  return digitalRead(RX_PIN);
+// Called from the timer ISR: use the inline GPIO HAL (register access, IRAM-safe).
+// digitalRead/digitalWrite and gpio_get/set_level are slower and live in flash.
+uint8_t IRAM_ATTR bus_is_high() {
+  return gpio_ll_get_level(&GPIO, RX_PIN);
 }
 
-void bus_set_low() {
-  digitalWrite(TX_PIN, LOW);
+void IRAM_ATTR bus_set_low() {
+  gpio_ll_set_level(&GPIO, TX_PIN, 0);
 }
 
-void bus_set_high() {
-  digitalWrite(TX_PIN, HIGH);
+void IRAM_ATTR bus_set_high() {
+  gpio_ll_set_level(&GPIO, TX_PIN, 1);
 }
 
 void ARDUINO_ISR_ATTR onDaliTimer() {
@@ -401,6 +405,7 @@ int commissionSlow(uint8_t initArg, bool reassignAll) {
   delay(RANDOMISE_DELAY_MS);
 
   int assigned = 0;
+  int verifyFailures = 0;
 
   while (assigned < 64) {
     uint32_t randomAdr = findRandomAddressSlow(true);
@@ -435,19 +440,38 @@ int commissionSlow(uint8_t initArg, bool reassignAll) {
     addLog("VERIFY SHORT ADDRESS SA" + String(sa) + " -> " +
            String(vraw) + " (" + rvName(vraw) + ")");
 
+    bool verified = vraw == 0xFF;
     if (qraw >= 0) {
       int decodedSa = ((uint8_t)qraw) >> 1;
       addLog("QUERY SHORT ADDRESS decoded -> SA" + String(decodedSa));
-      if (decodedSa == sa) addLog("VERIFY CLEAN");
-      else addLog("VERIFY WARNING: decoded address differs");
+      if (decodedSa == sa) {
+        addLog("VERIFY CLEAN");
+        verified = true;
+      } else {
+        addLog("VERIFY WARNING: decoded address differs");
+      }
     } else if (qraw == -DALI_RESULT_INVALID_REPLY ||
                qraw == -DALI_RESULT_COLLISION ||
                vraw == -DALI_RESULT_INVALID_REPLY ||
                vraw == -DALI_RESULT_COLLISION) {
       addLog("VERIFY: backward activity detected, but frame decoding is not clean");
+      verified = true;
     } else {
       addLog("VERIFY WARNING: no clean backward confirmation");
     }
+
+    // No confirmation usually means a lost COMPARE reply sent the binary search
+    // to a wrong random address and no gear was selected. Keep SA free and
+    // search again instead of withdrawing nothing.
+    if (!verified) {
+      if (++verifyFailures >= 3) {
+        addLog("Giving up: 3 consecutive unverified assignments");
+        break;
+      }
+      addLog("SA" + String(sa) + " not confirmed, repeating search");
+      continue;
+    }
+    verifyFailures = 0;
 
     used[sa] = true;
     assigned++;
@@ -1199,12 +1223,17 @@ void setup() {
   pinMode(TX_PIN, OUTPUT);
   digitalWrite(TX_PIN, HIGH);
 
-  // 1200 baud * 8 samples = 9600 timer callbacks / second
-  daliTimer = timerBegin(9600000);
-  timerAttachInterrupt(daliTimer, &onDaliTimer);
-  timerAlarm(daliTimer, 1000, true, 0);
-
+  // Waveshare TX is inverted: TX pin HIGH pulls the DALI bus low,
+  // so the library's "set low" callback drives the pin HIGH.
   dali.begin(bus_is_high, bus_set_high, bus_set_low);
+
+  // 1200 baud * 8 samples = 9600 timer callbacks / second.
+  // The timer prescaler is an integer divider of the 80 MHz clock: 9.6 MHz would
+  // silently become 10 MHz (10 kHz ISR, Te 400us). 8 MHz / 833 = 9603.8 Hz (+0.04%).
+  // Start the timer only after dali.begin(): the ISR uses the bus callbacks.
+  daliTimer = timerBegin(8000000);
+  timerAttachInterrupt(daliTimer, &onDaliTimer);
+  timerAlarm(daliTimer, 833, true, 0);
 
   setupWifi();
   setupHttp();

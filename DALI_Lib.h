@@ -88,6 +88,7 @@ public:
   uint8_t  compare();
   void     program_short_address(uint8_t shortadr);
   uint8_t  query_short_address();
+  uint8_t  verify_short_address(uint8_t shortadr); //returns 1 if the selected gear confirms this short address
   uint32_t find_addr();
   
 private:

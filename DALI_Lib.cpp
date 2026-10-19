@@ -37,7 +37,9 @@ Changelog:
 #include "esp_log.h"
 
 // timing
-#define BEFORE_CMD_IDLE_MS 13 // require 13ms idle time before sending a cmd()
+// idlecnt counts timer samples (104.17us each), not milliseconds.
+// 100 samples = 10.4ms >= 22 Te (9.17ms), the settling time required by DALI-1 gear
+#define BEFORE_CMD_IDLE_TICKS 100
 
 // busstate
 #define IDLE 0
@@ -406,7 +408,7 @@ uint8_t Dali::tx_wait(uint8_t* data, uint8_t bitlen, uint32_t timeout_ms)
     uint32_t start_ms = milli();
     while (1) {
         // wait for 10ms idle
-        while (idlecnt < BEFORE_CMD_IDLE_MS) {
+        while (idlecnt < BEFORE_CMD_IDLE_TICKS) {
             // Serial.print('w');
             if (milli() - start_ms > timeout_ms)
                 return DALI_RESULT_TIMEOUT;
@@ -601,7 +603,7 @@ void Dali::set_searchaddr_diff(uint32_t adr_new, uint32_t adr_current)
 // as more than one device can reply, the reply gets garbled
 uint8_t Dali::compare()
 {
-    uint8_t retry = 2;
+    uint8_t retry = 3;
     while (retry > 0) {
         // compare is true if we received any activity on the bus as reply.
         // sometimes the reply is not registered... so only accept retry times 'no reply' as a real false compare
@@ -628,6 +630,19 @@ void Dali::program_short_address(uint8_t shortadr)
 uint8_t Dali::query_short_address()
 {
     return cmd(DALI_QUERY_SHORT_ADDRESS, 0x00) >> 1;
+}
+
+// Does the selected gear have short address AAAAAA? Only the selected gear answers YES.
+uint8_t Dali::verify_short_address(uint8_t shortadr)
+{
+    uint8_t retry = 2;
+    while (retry > 0) {
+        int16_t rv = cmd(DALI_VERIFY_SHORT_ADDRESS, (shortadr << 1) | 0x01);
+        if (rv == 0xFF || rv == -DALI_RESULT_INVALID_REPLY || rv == -DALI_RESULT_COLLISION)
+            return 1;
+        retry--;
+    }
+    return 0;
 }
 
 // find addr with binary search
@@ -691,6 +706,7 @@ uint8_t Dali::commission(uint8_t init_arg)
     }
 
     // find random addresses and assign unused short addresses
+    uint8_t failures = 0;
     while (1) {
         uint32_t adr = find_addr();
         if (adr > 0xffffff)
@@ -704,14 +720,21 @@ uint8_t Dali::commission(uint8_t init_arg)
         if (sa >= 64)
             break; // all 64 short addresses assigned -> exit
 
-        // mark short address as used
-        arr[sa] = 1;
-        cnt++;
-
         // assign short address
         program_short_address(sa);
 
-        // Serial.println(query_short_address()); //TODO check read adr, handle if not the same...
+        // a lost COMPARE reply makes find_addr() return a wrong address and selects no gear:
+        // keep the short address free and search again instead of withdrawing nothing
+        if (!verify_short_address(sa)) {
+            if (++failures >= 3)
+                break;
+            continue;
+        }
+        failures = 0;
+
+        // mark short address as used
+        arr[sa] = 1;
+        cnt++;
 
         // remove the device from the search
         cmd(DALI_WITHDRAW, 0x00);
