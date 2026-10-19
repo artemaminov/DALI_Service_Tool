@@ -934,6 +934,7 @@ void identifyDevice(int sa) {
 void setDeviceLevel(int sa, uint8_t level) {
   setOperation(level ? "ON" : "OFF");
   dali.set_level(level, sa);
+  devices[sa].level = level;
   delay(200);
   finishOperation("SA" + String(sa) + (level ? " ON" : " OFF"));
 }
@@ -987,6 +988,7 @@ void setBroadcastLevel(uint8_t level) {
 
   // 0xFF is DALI broadcast address for Direct Arc Power Control.
   dali.set_level(level, 0xFF);
+  for (int sa = 0; sa < 64; sa++) if (devices[sa].present) devices[sa].level = level;
   addLog(String("BROADCAST -> ") + (level ? "ON (level 200)" : "OFF (level 0)"));
   delay(200);
 
@@ -1449,7 +1451,13 @@ void targetControl(int adr, int action, int value) {
     case 0: dali.cmd(DALI_OFF, adr); what = "OFF"; break;
     case 1: dali.cmd(DALI_RECALL_MAX_LEVEL, adr); what = "RECALL MAX LEVEL"; break;
     case 2: dali.cmd(DALI_RECALL_MIN_LEVEL, adr); what = "RECALL MIN LEVEL"; break;
-    case 3: dali.set_level((uint8_t)value, adr); what = "LEVEL " + String(value); break;
+    case 3:
+      dali.set_level((uint8_t)value, adr);
+      what = "LEVEL " + String(value);
+      // keep the table in sync for addressed and broadcast levels (groups: membership may be unknown)
+      if (adr < 64) devices[adr].level = value;
+      else if (adr == 0x7F) for (int sa = 0; sa < 64; sa++) if (devices[sa].present) devices[sa].level = value;
+      break;
     case 4: dali.cmd(DALI_GO_TO_SCENE0 + value, adr); what = "GO TO SCENE " + String(value); break;
   }
   addLog(name + " -> " + what);

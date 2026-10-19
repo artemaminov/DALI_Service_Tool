@@ -45,6 +45,10 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
 .tc input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#e9edf3;border:2px solid #232a34}
 .tc input[type=range]:disabled{opacity:.45;cursor:not-allowed}
 .tc .tc-k{min-width:52px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.tc.lvl input[type=range]{background:linear-gradient(90deg,#1b2029,#6b7686,#fff6dc)}
+.tc.lvl .tc-k{min-width:74px}
+.sliders{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px}
+.sliders .tc{margin-left:0}
 @media(max-width:900px){.device-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}
 .lbl{color:var(--muted);font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .edit-btn{padding:2px 6px;font-size:11px;margin-left:4px}
@@ -173,6 +177,16 @@ canvas{width:100%;height:150px;background:#0b0d10;border:1px solid #262c34;borde
         <span style="width:12px"></span>
         <button class="primary op" onclick="broadcastAction('on')">BROADCAST ON <span class="help" data-tip="Broadcast is one DALI command addressed to all control gear on the bus. It does not require or use individual short addresses.">?</span></button>
         <button class="op" onclick="broadcastAction('off')">BROADCAST OFF</button>
+        <div class="sliders" style="flex-basis:100%;margin-top:2px">
+        <span class="small muted">Broadcast:</span>
+        <span class="tc lvl">
+          <input id="lvlBroadcast" class="op" type="range" min="0" max="254" value="200"
+            aria-label="Broadcast brightness"
+            oninput="levelBroadcastInput(this)"
+            onchange="levelBroadcastCommit(this)">
+          <span class="tc-k" id="lvlBroadcastLabel">200 · 23%</span>
+          <span class="help" data-tip="Broadcast brightness (Direct Arc Power Control) to all gear at once. DALI levels are logarithmic: 1 = 0.1%, 128 = 3.2%, 200 = 23%, 254 = 100%. 0 switches off.">?</span>
+        </span>
         <span class="tc">
           <input id="tcBroadcast" class="op" type="range" min="154" max="370" value="262"
             aria-label="Broadcast colour temperature"
@@ -181,6 +195,7 @@ canvas{width:100%;height:150px;background:#0b0d10;border:1px solid #262c34;borde
           <span class="tc-k" id="tcBroadcastLabel">3820 K</span>
           <span class="help" data-tip="Broadcast colour temperature (DALI DT8) to all gear at once, cold on the left, warm on the right (6500–2700 K). Gear without DT8 ignores the command.">?</span>
         </span>
+        </div>
       </div>
 
       <div class="small muted" style="margin-top:8px">
@@ -308,8 +323,8 @@ const autoExpandAfterInspect = new Set();
 const TC_DEFAULT_COOLEST = 154; // 6500 K, used until Inspect reads the gear limits
 const TC_DEFAULT_WARMEST = 370; // 2700 K
 const tcValues = new Map();     // SA -> last mirek chosen in the UI
-let tcDragging = false;         // pause table re-render while a slider is being moved
-document.addEventListener("pointerup", () => { tcDragging = false; });
+let sliderDragging = false;     // pause table re-render while a slider is being moved
+document.addEventListener("pointerup", () => { sliderDragging = false; });
 
 const tooltip = document.getElementById("tooltip");
 
@@ -397,6 +412,7 @@ function recommissionAll(){
 }
 
 function deviceAction(sa, cmd){
+  if(cmd==="on" || cmd==="off") levelValues.delete(sa);
   start("/api/device?sa="+sa+"&cmd="+cmd);
 }
 
@@ -432,6 +448,7 @@ function selectedAction(cmd){
 }
 
 function broadcastAction(cmd){
+  levelValues.clear();
   start("/api/broadcast?cmd="+cmd);
 }
 
@@ -631,14 +648,70 @@ function tcRange(d){
   return cool < warm ? [cool, warm] : [TC_DEFAULT_COOLEST, TC_DEFAULT_WARMEST];
 }
 
+// DALI arc power is logarithmic: level 1 = 0.1 %, 254 = 100 %, 0 = off
+function levelPercent(l){
+  if(l<=0) return "off";
+  const p=Math.pow(10, (l-1)*3/253 - 1);
+  return (p<10 ? p.toFixed(1) : Math.round(p)) + "%";
+}
+
+function levelText(l){
+  return l<=0 ? "0 · off" : `${l} · ${levelPercent(l)}`;
+}
+
+const levelValues = new Map(); // SA -> last level chosen in the UI
+
+function levelControl(d){
+  let l = levelValues.has(d.sa) ? levelValues.get(d.sa) : ((d.level>=0 && d.level<=254) ? d.level : 0);
+  return `<span class="tc lvl">
+      <input class="op lvl-slider" data-sa="${d.sa}" type="range" min="0" max="254" value="${l}"
+        aria-label="Brightness SA${d.sa}"
+        onpointerdown="sliderDragging=true"
+        oninput="levelInput(${d.sa},this)"
+        onchange="levelCommit(${d.sa},this)">
+      <span class="tc-k" id="lvlLabel${d.sa}">${levelText(l)}</span>
+      <span class="help" data-tip="Brightness of this luminaire (Direct Arc Power Control). DALI levels are logarithmic: 1 = 0.1%, 128 = 3.2%, 200 = 23%, 254 = 100%. 0 switches off.">?</span>
+    </span>`;
+}
+
+function levelInput(sa, el){
+  sliderDragging = true;
+  const label = document.getElementById("lvlLabel"+sa);
+  if(label) label.textContent = levelText(Number(el.value));
+}
+
+function levelCommit(sa, el){
+  sliderDragging = false;
+  const l = Number(el.value);
+  levelValues.set(sa, l);
+  start(`/api/target?adr=${sa}&action=level&value=${l}`);
+}
+
+function levelBroadcastInput(el){
+  document.getElementById("lvlBroadcastLabel").textContent = levelText(Number(el.value));
+}
+
+function levelBroadcastCommit(el){
+  const l = Number(el.value);
+  // Every gear receives the same level, keep the per-device sliders in sync
+  document.querySelectorAll("input.lvl-slider").forEach(s => {
+    const sa = Number(s.dataset.sa);
+    levelValues.set(sa, l);
+    s.value = l;
+    levelInput(sa, s);
+  });
+  sliderDragging = false;
+  start(`/api/target?adr=127&action=level&value=${l}`);
+}
+
 function tcControl(d){
   const [cool, warm] = tcRange(d);
   let m = tcValues.has(d.sa) ? tcValues.get(d.sa) : (validMirek(d.tc) ? d.tc : Math.round((cool + warm) / 2));
   m = Math.min(warm, Math.max(cool, m));
   return `<span class="tc">
-      <input class="op" type="range" min="${cool}" max="${warm}" value="${m}"
+      <input class="op tc-slider" data-sa="${d.sa}" type="range" min="${cool}" max="${warm}" value="${m}"
         aria-label="Colour temperature SA${d.sa}"
-        onpointerdown="tcDragging=true"
+        onpointerdown="sliderDragging=true"
         oninput="tcInput(${d.sa},this)"
         onchange="tcCommit(${d.sa},this)">
       <span class="tc-k" id="tcLabel${d.sa}">${kelvin(m)} K</span>
@@ -647,13 +720,13 @@ function tcControl(d){
 }
 
 function tcInput(sa, el){
-  tcDragging = true;
+  sliderDragging = true;
   const label = document.getElementById("tcLabel"+sa);
   if(label) label.textContent = kelvin(Number(el.value)) + " K";
 }
 
 function tcCommit(sa, el){
-  tcDragging = false;
+  sliderDragging = false;
   const mirek = Number(el.value);
   tcValues.set(sa, mirek);
   start("/api/device?sa="+sa+"&cmd=tc&mirek="+mirek);
@@ -666,7 +739,13 @@ function tcBroadcastInput(el){
 function tcBroadcastCommit(el){
   const mirek = Number(el.value);
   // Every gear receives the same value, keep the per-device sliders in sync
-  document.querySelectorAll("input.deviceSelect").forEach(cb => tcValues.set(Number(cb.dataset.sa), mirek));
+  document.querySelectorAll("input.tc-slider").forEach(s => {
+    const sa = Number(s.dataset.sa);
+    tcValues.set(sa, mirek);
+    s.value = Math.min(Number(s.max), Math.max(Number(s.min), mirek));
+    const label = document.getElementById("tcLabel"+sa);
+    if(label) label.textContent = kelvin(Number(s.value)) + " K";
+  });
   start("/api/broadcast?cmd=tc&mirek="+mirek);
 }
 
@@ -697,8 +776,8 @@ function buildRow(d){
       <button class="op" onclick="deviceAction(${d.sa},'identify')">Identify <span class="help" data-tip="Flashes this addressed luminaire three times so you can match its physical location to its short address.">?</span></button>
       <button class="op" onclick="deviceAction(${d.sa},'off')">Off</button>
       <button class="op" onclick="deviceAction(${d.sa},'on')">On</button>
-      ${tcControl(d)}
       <button id="expandBtn${d.sa}" class="expand-btn" onclick="toggleDeviceCard(${d.sa})">${expandedSAs.has(d.sa)?"▴":"▾"}</button>
+      <div class="sliders">${levelControl(d)}${tcControl(d)}</div>
     </td>`;
 
   const detail=document.createElement("tr");
@@ -1116,7 +1195,7 @@ async function refresh(){
     document.getElementById("progressBar").style.width=s.progress+"%";
     document.getElementById("lastResult").textContent=s.lastResult||"";
     lastDevices=s.devices;
-    if(!tcDragging) renderDevices(s.devices);
+    if(!sliderDragging) renderDevices(s.devices);
     renderStats(s);
     document.getElementById("scanDiff").textContent=s.scanDiff||"—";
     document.getElementById("autoScanState").textContent = s.autoScan ? `active, every ${s.autoScan} min` : "off";
