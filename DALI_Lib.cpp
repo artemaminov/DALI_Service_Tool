@@ -86,6 +86,14 @@ void IRAM_ATTR Dali::timer()
     // get bus sample
     uint8_t busishigh = (bus_is_high() ? 1 : 0); // bus_high is 1 on high (non-asserted), 0 on low (asserted)
 
+    // waveform capture
+    if (cap_active) {
+        if (busishigh)
+            cap_buf[cap_pos >> 3] |= 0x80 >> (cap_pos & 0x7);
+        if (++cap_pos >= cap_len)
+            cap_active = 0;
+    }
+
     // // //millis update
     // // ticks++;
     // // if(ticks==10) {
@@ -140,6 +148,8 @@ void IRAM_ATTR Dali::timer()
             diag_tx_low_samples++;
         if (txhbcnt >= txhblen) {
             // all bits transmitted, go back to IDLE
+            if (cap_active)
+                cap_tx_end = cap_pos;
             _set_busstate_idle();
         } else {
             // check for collisions (transmitting high but bus is low)
@@ -226,8 +236,24 @@ uint8_t Dali::tx(uint8_t* data, uint8_t bitlen)
     txspcnt = 0;
     txcollision = 0;
     rxstate = EMPTY;
+    if (cap_active)
+        cap_tx_start = cap_pos;
     busstate = TX;
     return DALI_OK;
+}
+
+// arm waveform capture into buf (samples bits), it stops by itself when full
+void Dali::capture_start(uint8_t* buf, uint16_t samples)
+{
+    cap_active = 0;
+    for (uint16_t i = 0; i < (samples + 7) / 8; i++)
+        buf[i] = 0;
+    cap_buf = buf;
+    cap_len = samples;
+    cap_pos = 0;
+    cap_tx_start = 0xFFFF;
+    cap_tx_end = 0xFFFF;
+    cap_active = 1;
 }
 
 uint8_t Dali::tx_state()
@@ -434,6 +460,8 @@ uint8_t Dali::tx_wait(uint8_t* data, uint8_t bitlen, uint32_t timeout_ms)
         }
         // exit if transmit was ok
         if (rv == DALI_OK) {
+            if (trace_cb)
+                trace_cb(DALI_TRACE_TX, data, bitlen, 0);
             int64_t start_us = esp_timer_get_time();
             // wait for some time idle
             while (esp_timer_get_time() - start_us < 1000)
@@ -456,37 +484,44 @@ int16_t Dali::tx_wait_rx(uint8_t cmd0, uint8_t cmd1, uint32_t timeout_ms)
     ESP_LOGI(TAG, "TX%1X%1X%1X%1X", cmd0 >> 4, cmd0 & 0xF, cmd1 >> 4, cmd1 & 0xF);
 #endif
 
-    uint8_t data[4];
+    uint8_t data[2];
     data[0] = cmd0;
     data[1] = cmd1;
-    int16_t rv = tx_wait(data, 16, timeout_ms);
+    return tx_wait_rx_frame(data, 16, timeout_ms);
+}
+
+// blocking transmit of a forward frame (16 or 24 bits), receive 1 byte reply (if a reply was sent)
+// returns >=0 with reply byte
+// returns <0 with negative result code
+int16_t Dali::tx_wait_rx_frame(uint8_t* data, uint8_t bitlen, uint32_t timeout_ms)
+{
+    int16_t rv = tx_wait(data, bitlen, timeout_ms);
     if (rv)
         return -rv;
-    ;
 
     // wait up to 10 ms for start of reply, additional 15ms for receive to complete
+    uint8_t reply[8]; // a garbled frame can decode to more than 32 bits
     uint32_t rx_start_ms = milli();
     uint32_t rx_timeout_ms = 10;
+    int16_t result;
     while (1) {
-        rv = rx(data);
-        switch (rv) {
-        case 0:
-            break; // nothing received yet, wait
-        case 1:
-            rx_timeout_ms = 25;
-            break; // extend timeout, wait for RX completion
-        case 2:
-            return -DALI_RESULT_COLLISION; // report collision
-        default:
-            if (rv == 8)
-                return data[0];
-            else
-                return -DALI_RESULT_INVALID_REPLY;
+        rv = rx(reply);
+        if (rv == 1) {
+            rx_timeout_ms = 25; // extend timeout, wait for RX completion
+        } else if (rv == 2) {
+            result = -DALI_RESULT_COLLISION; // report collision
+            rv = 0;
+            break;
+        } else if (rv > 2) {
+            result = (rv == 8) ? reply[0] : -DALI_RESULT_INVALID_REPLY;
+            break;
         }
         if (milli() - rx_start_ms > rx_timeout_ms)
             return -DALI_RESULT_NO_REPLY;
     }
-    return -DALI_RESULT_NO_REPLY; // should not get here
+    if (trace_cb)
+        trace_cb(DALI_TRACE_REPLY, reply, rv, result);
+    return result;
 }
 
 // check YAAAAAA: 0000 0000 to 0011 1111 adr, 0100 0000 to 0100 1111 group, x111 1111 broadcast
@@ -820,6 +855,28 @@ int32_t Dali::query_colour_value(uint8_t selector, uint8_t adr)
     if (lsb < 0)
         return lsb;
     return ((uint16_t)msb << 8) | (uint8_t)lsb;
+}
+
+// read count bytes of a memory bank starting at offset: out[i] = byte or negative DALI_RESULT_xxx
+// returns 0 on success, 1 if DTR1 (bank) or 2 if DTR0 (offset) could not be set
+uint8_t Dali::read_memory(uint8_t bank, uint8_t offset, int16_t* out, uint8_t count, uint8_t adr)
+{
+    if (set_dtr1(bank, adr))
+        return 1;
+    if (set_dtr0(offset, adr))
+        return 2;
+    for (uint8_t i = 0; i < count; i++) {
+        out[i] = cmd(DALI_READ_MEMORY_LOCATION, adr); // gear increments DTR0 after each read
+        if (out[i] < 0 && i + 1 < count) {
+            // a lost reply leaves the DTR0 position unknown: set it explicitly
+            if (set_dtr0(offset + i + 1, adr)) {
+                for (i++; i < count; i++)
+                    out[i] = -DALI_RESULT_NO_REPLY;
+                return 2;
+            }
+        }
+    }
+    return 0;
 }
 
 uint8_t Dali::read_memory_bank(uint8_t bank, uint8_t adr)

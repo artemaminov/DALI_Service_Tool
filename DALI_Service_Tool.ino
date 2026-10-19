@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <Preferences.h>
+#include "esp_timer.h"
 #include "hal/gpio_ll.h"
 #include "soc/gpio_struct.h"
 #include "DALI_Lib.h"
@@ -121,6 +123,60 @@ String lastResult = "";
 String logText = "";
 String lastReport = "";
 SemaphoreHandle_t stateMutex = nullptr;
+SemaphoreHandle_t busMutex = nullptr; // held by DALI operations; the bus monitor reads only while it is free
+
+// Device labels, stored in NVS
+Preferences prefs;
+String labels[64];
+
+// Scan history and per-address reliability statistics
+struct SaStats {
+  uint32_t ok = 0;
+  uint32_t invalid = 0;
+  uint32_t collision = 0;
+};
+SaStats saStats[64];
+uint32_t statRounds = 0;
+uint64_t lastScanMask = 0;
+bool haveLastScan = false;
+String lastScanDiff = "";
+uint32_t autoScanMinutes = 0;
+uint32_t lastAutoScanMs = 0;
+
+// Bus trace ring buffer (our frames, replies and frames of other bus participants)
+#define TRACE_FOREIGN 2      // frame sent by another bus participant
+#define TRACE_FOREIGN_ERR 3  // undecodable bus activity
+struct TraceEntry {
+  uint32_t seq;
+  int64_t us;
+  uint8_t kind;
+  uint8_t bits;
+  uint8_t data[4];
+  int16_t rv;
+};
+static const int TRACE_SIZE = 200;
+TraceEntry traceBuf[TRACE_SIZE];
+uint32_t traceSeq = 0;
+SemaphoreHandle_t traceMutex = nullptr;
+
+// Waveform capture of the RX pin
+static const uint16_t SCOPE_MAX_SAMPLES = 4096; // 427 ms at 9600 Hz
+uint8_t scopeBuf[SCOPE_MAX_SAMPLES / 8];
+uint16_t scopeSamples = 0;
+uint16_t scopeTxStart = 0xFFFF;
+uint16_t scopeTxEnd = 0xFFFF;
+uint32_t scopeSeq = 0;
+String scopeTitle = "";
+
+// Last memory bank read
+struct MemoryDump {
+  int sa = -1;
+  int bank = -1;
+  uint8_t count = 0;
+  int16_t bytes[64];
+};
+MemoryDump memDump;
+uint32_t memSeq = 0;
 
 enum OpType {
   OP_NONE,
@@ -142,7 +198,18 @@ enum OpType {
   OP_BROADCAST_ON,
   OP_BROADCAST_OFF,
   OP_SET_TC,
-  OP_BROADCAST_TC
+  OP_BROADCAST_TC,
+  OP_PRESENCE_TEST,
+  OP_RAW,
+  OP_DIM_TEST,
+  OP_TC_TEST,
+  OP_MEMORY,
+  OP_RESET_DEVICE,
+  OP_CONFIG,
+  OP_GROUPS,
+  OP_SCENES,
+  OP_TARGET,
+  OP_SCAN_ROUNDS
 };
 
 struct PendingOp {
@@ -150,9 +217,16 @@ struct PendingOp {
   int sa = -1;
   uint64_t mask = 0;
   int value = 0;
+  int value2 = 0;
+  int16_t p[16];  // per-operation parameters, -1 = not set
+
+  PendingOp() {
+    for (int i = 0; i < 16; i++) p[i] = -1;
+  }
 };
 
 PendingOp pendingOp;
+PendingOp requestOp; // filled by HTTP handlers, then started with startRequested()
 
 // ============================================================
 // Utility
@@ -244,6 +318,63 @@ int firstFreeShortAddress(const bool used[64]) {
 // DALI helpers
 // ============================================================
 
+void traceAdd(uint8_t kind, const uint8_t* data, uint8_t bits, int16_t rv) {
+  if (!traceMutex) return;
+  xSemaphoreTake(traceMutex, portMAX_DELAY);
+  TraceEntry& e = traceBuf[traceSeq % TRACE_SIZE];
+  e.seq = ++traceSeq;
+  e.us = esp_timer_get_time();
+  e.kind = kind;
+  e.bits = bits;
+  e.rv = rv;
+  memset(e.data, 0, sizeof(e.data));
+  if (data) {
+    int n = (bits + 7) / 8;
+    memcpy(e.data, data, n > 4 ? 4 : n);
+  }
+  xSemaphoreGive(traceMutex);
+}
+
+// Records frames that nobody asked for: other masters, input devices, late or stray replies.
+void monitorTask(void* parameter) {
+  uint8_t buf[8]; // a garbled frame can decode to more than 32 bits
+  for (;;) {
+    if (xSemaphoreTake(busMutex, 0) == pdTRUE) {
+      uint8_t rv = dali.rx(buf);
+      xSemaphoreGive(busMutex);
+      if (rv == 2) traceAdd(TRACE_FOREIGN_ERR, nullptr, 0, -DALI_RESULT_COLLISION);
+      else if (rv > 2) traceAdd(TRACE_FOREIGN, buf, rv, 0);
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+void startScope(uint16_t samples) {
+  if (samples > SCOPE_MAX_SAMPLES) samples = SCOPE_MAX_SAMPLES;
+  dali.capture_start(scopeBuf, samples);
+}
+
+void finishScope(const String& title) {
+  uint32_t t0 = millis();
+  while (dali.cap_active && millis() - t0 < 1000) delay(5);
+  dali.cap_active = 0;
+  scopeSamples = dali.cap_pos;
+  scopeTxStart = dali.cap_tx_start;
+  scopeTxEnd = dali.cap_tx_end;
+  scopeTitle = title;
+  scopeSeq++;
+}
+
+String hexBytes(const uint8_t* data, int n) {
+  String s;
+  char b[4];
+  for (int i = 0; i < n; i++) {
+    snprintf(b, sizeof(b), "%02X", data[i]);
+    s += b;
+  }
+  return s;
+}
+
 void resetRxDiag() {
   dali.diag_tx_samples = 0;
   dali.diag_tx_low_samples = 0;
@@ -327,11 +458,37 @@ int scanBus(bool detailed, bool finalize = true) {
       line += rvName(d.status) + " rv=" + String(d.status);
     }
 
+    if (d.replyValid) saStats[sa].ok++;
+    else if (d.status == -DALI_RESULT_INVALID_REPLY) saStats[sa].invalid++;
+    else if (d.status == -DALI_RESULT_COLLISION) saStats[sa].collision++;
+
     addLog(line);
     report += line + "\n";
     progressPct = (uint8_t)(((sa + 1) * 100) / 64);
     delay(10);
   }
+  statRounds++;
+
+  // Compare with the previous scan
+  uint64_t mask = 0;
+  for (int sa = 0; sa < 64; sa++) if (devices[sa].present) mask |= (1ULL << sa);
+  String diff;
+  if (!haveLastScan) {
+    diff = "first scan";
+  } else {
+    for (int sa = 0; sa < 64; sa++) {
+      bool now = mask & (1ULL << sa);
+      bool before = lastScanMask & (1ULL << sa);
+      if (now && !before) diff += (diff.length() ? " " : "") + String("+SA") + String(sa);
+      if (!now && before) diff += (diff.length() ? " " : "") + String("-SA") + String(sa);
+    }
+    if (!diff.length()) diff = "no changes";
+  }
+  lastScanMask = mask;
+  haveLastScan = true;
+  lastScanDiff = diff;
+  addLog("Compared with previous scan: " + diff);
+  report += "Compared with previous scan: " + diff + "\n";
 
   addLog(rxDiagLine());
   report += rxDiagLine() + "\n";
@@ -935,12 +1092,387 @@ void clearAllAddresses() {
 }
 
 // ============================================================
+// Diagnostics and device tools
+// ============================================================
+
+bool isActivity(int16_t rv) {
+  return rv >= 0 || rv == -DALI_RESULT_INVALID_REPLY || rv == -DALI_RESULT_COLLISION;
+}
+
+// Broadcast queries that every gear answers, with or without a short address.
+void presenceTest() {
+  setOperation("Bus presence test");
+  resetRxDiag();
+  String report = "BUS PRESENCE TEST\n";
+  int present = 0, missing = 0;
+
+  for (int i = 0; i < 5; i++) {
+    int16_t rv = dali.cmd(DALI_QUERY_CONTROL_GEAR_PRESENT, 0x7F);
+    if (isActivity(rv)) present++;
+    String line = "QUERY CONTROL GEAR PRESENT (broadcast) #" + String(i + 1) + ": " + rvName(rv) + " rv=" + String(rv);
+    addLog(line);
+    report += line + "\n";
+    progressPct = (uint8_t)((i + 1) * 10);
+    delay(50);
+  }
+  for (int i = 0; i < 5; i++) {
+    int16_t rv = dali.cmd(DALI_QUERY_MISSING_SHORT_ADDRESS, 0x7F);
+    if (isActivity(rv)) missing++;
+    String line = "QUERY MISSING SHORT ADDRESS (broadcast) #" + String(i + 1) + ": " + rvName(rv) + " rv=" + String(rv);
+    addLog(line);
+    report += line + "\n";
+    progressPct = (uint8_t)(50 + (i + 1) * 10);
+    delay(50);
+  }
+  addLog("Several gears answering together give INVALID/COLLISION, this still means presence");
+  addLog(rxDiagLine());
+  report += rxDiagLine() + "\n";
+  lastReport = report;
+
+  String result;
+  if (!present) {
+    result = "NO gear answers on the bus: check the bus power supply (current limited) and wiring";
+  } else {
+    result = "Gear answers " + String(present) + "/5";
+    result += missing ? ", unaddressed gear present (" + String(missing) + "/5)" : ", no unaddressed gear";
+  }
+  finishOperation(result);
+}
+
+void rawCommand(uint32_t frame, int bits, bool expectReply, int repeat, int captureSamples) {
+  uint8_t data[3];
+  int nbytes = bits / 8;
+  for (int i = 0; i < nbytes; i++) data[i] = frame >> (8 * (nbytes - 1 - i));
+  String hex = hexBytes(data, nbytes);
+
+  setOperation("Raw " + hex);
+  String report = "RAW COMMAND " + hex + " (" + String(bits) + " bit)\n";
+  int replies = 0;
+
+  for (int i = 0; i < repeat; i++) {
+    if (i == 0 && captureSamples > 0) startScope(captureSamples);
+
+    int16_t rv;
+    String line = "RAW " + hex + " #" + String(i + 1) + ": ";
+    if (expectReply) {
+      rv = dali.tx_wait_rx_frame(data, bits);
+      if (rv >= 0) {
+        char b[8];
+        snprintf(b, sizeof(b), "0x%02X", rv);
+        line += "REPLY " + String(b);
+      } else {
+        line += rvName(rv) + " rv=" + String(rv);
+      }
+      if (isActivity(rv)) replies++;
+    } else {
+      rv = -(int16_t)dali.tx_wait(data, bits);
+      line += rv == 0 ? "SENT" : rvName(rv);
+    }
+
+    if (i == 0 && captureSamples > 0) finishScope("RAW " + hex);
+    addLog(line);
+    report += line + "\n";
+    progressPct = (uint8_t)((i + 1) * 100 / repeat);
+    if (i + 1 < repeat) delay(50);
+  }
+
+  lastReport = report;
+  if (expectReply) finishOperation("Raw " + hex + ": bus activity in " + String(replies) + "/" + String(repeat) + " attempt(s)");
+  else finishOperation("Raw " + hex + " sent " + String(repeat) + " time(s)");
+}
+
+// Waits until the fade finishes (STATUS bit 4 "fade running"), at most 3 s, then reads the level.
+int16_t waitFadeAndReadLevel(int sa) {
+  uint32_t t0 = millis();
+  delay(100);
+  while (millis() - t0 < 3000) {
+    int16_t st = dali.cmd(DALI_QUERY_STATUS, sa);
+    if (st < 0 || !(st & 0x10)) break;
+    delay(100);
+  }
+  delay(50);
+  return dali.cmd(DALI_QUERY_ACTUAL_LEVEL, sa);
+}
+
+void dimTest(int sa) {
+  setOperation("Dimming test SA" + String(sa));
+  String report = "DIMMING TEST SA" + String(sa) + "\n";
+
+  int16_t oldLevel = dali.cmd(DALI_QUERY_ACTUAL_LEVEL, sa); delay(20);
+  int16_t minL = dali.cmd(DALI_QUERY_MIN_LEVEL, sa); delay(20);
+  int16_t maxL = dali.cmd(DALI_QUERY_MAX_LEVEL, sa); delay(20);
+  String head = "current=" + String(oldLevel) + " min=" + String(minL) + " max=" + String(maxL);
+  if (minL < 1 || minL > 254) minL = 1;
+  if (maxL < 1 || maxL > 254 || maxL < minL) maxL = 254;
+  addLog("Dimming test SA" + String(sa) + ": " + head);
+  report += head + "\n";
+
+  const int steps = 8;
+  int mismatches = 0, noReply = 0;
+  for (int i = 0; i <= steps; i++) {
+    uint8_t target = minL + (maxL - minL) * i / steps;
+    dali.set_level(target, sa);
+    int16_t actual = waitFadeAndReadLevel(sa);
+
+    String line = "set " + String(target) + " -> actual " + String(actual);
+    if (actual < 0) {
+      noReply++;
+      line += " (" + rvName(actual) + ")";
+    } else if (abs(actual - (int)target) > 1) {
+      mismatches++;
+      line += "  MISMATCH";
+    }
+    addLog(line);
+    report += line + "\n";
+    progressPct = (uint8_t)((i + 1) * 100 / (steps + 1));
+  }
+
+  if (oldLevel >= 0 && oldLevel <= 254) dali.set_level((uint8_t)oldLevel, sa);
+  lastReport = report;
+  finishOperation("Dimming test SA" + String(sa) + ": " + String(mismatches) + " mismatch(es), " +
+                  String(noReply) + " without reply");
+}
+
+bool validMirek(int32_t v) {
+  return v > 0 && v < 0xFFFF;
+}
+
+void tcTest(int sa) {
+  setOperation("Colour temperature test SA" + String(sa));
+  String report = "COLOUR TEMPERATURE TEST SA" + String(sa) + "\n";
+
+  dali.cmd(DALI_ENABLE_DEVICE_TYPE_X, 8);
+  int16_t features = dali.cmd(DALI_DT8_QUERY_COLOUR_TYPE_FEATURES, sa); delay(20);
+  String f = "features=" + String(features);
+  if (features >= 0) {
+    f += " (xy=" + String(features & 1 ? "yes" : "no") +
+         ", Tc=" + String(features & 2 ? "yes" : "no") +
+         ", primaries=" + String((features >> 2) & 7) +
+         ", RGBWAF channels=" + String((features >> 5) & 7) + ")";
+  }
+  int32_t cur = dali.query_colour_value(DALI_DT8_SELECTOR_TC, sa); delay(20);
+  int32_t cool = dali.query_colour_value(DALI_DT8_SELECTOR_TC_COOLEST, sa); delay(20);
+  int32_t warm = dali.query_colour_value(DALI_DT8_SELECTOR_TC_WARMEST, sa); delay(20);
+  f += " current=" + String(cur) + " coolest=" + String(cool) + " warmest=" + String(warm) + " mirek";
+  addLog("Tc test SA" + String(sa) + ": " + f);
+  report += f + "\n";
+
+  if (features < 0 && !validMirek(cur)) {
+    lastReport = report;
+    finishOperation("Tc test SA" + String(sa) + ": no DT8 reply (" + rvName(features) + ")");
+    return;
+  }
+
+  int32_t lo = validMirek(cool) ? cool : 154;
+  int32_t hi = validMirek(warm) ? warm : 370;
+  if (lo >= hi) { lo = 154; hi = 370; }
+
+  const int steps = 4;
+  int mismatches = 0, noReply = 0;
+  for (int i = 0; i <= steps; i++) {
+    uint16_t target = lo + (hi - lo) * i / steps;
+    dali.set_colour_temperature(target, sa);
+    delay(800);
+    int32_t actual = dali.query_colour_value(DALI_DT8_SELECTOR_TC, sa);
+
+    String line = "set " + String(target) + " mirek (" + String(1000000UL / target) + " K) -> actual " + String(actual);
+    if (actual < 0) {
+      noReply++;
+      line += " (" + rvName(actual) + ")";
+    } else if (abs(actual - (int32_t)target) > max(2, (int)target / 50)) {
+      mismatches++;
+      line += "  MISMATCH";
+    }
+    addLog(line);
+    report += line + "\n";
+    progressPct = (uint8_t)((i + 1) * 100 / (steps + 1));
+  }
+
+  if (validMirek(cur)) dali.set_colour_temperature((uint16_t)cur, sa);
+  devices[sa].tc = cur;
+  devices[sa].tcCoolest = cool;
+  devices[sa].tcWarmest = warm;
+  lastReport = report;
+  finishOperation("Tc test SA" + String(sa) + ": " + String(mismatches) + " mismatch(es), " +
+                  String(noReply) + " without reply");
+}
+
+void readMemoryBank(int sa, int bank) {
+  setOperation("Memory bank " + String(bank) + " SA" + String(sa));
+  MemoryDump m;
+  m.sa = sa;
+  m.bank = bank;
+
+  // Byte 0 of every bank is the address of its last accessible location.
+  int16_t first = -DALI_RESULT_NO_REPLY;
+  uint8_t err = dali.read_memory((uint8_t)bank, 0, &first, 1, (uint8_t)sa);
+  if (err || first < 0) {
+    memDump = m;
+    memSeq++;
+    finishOperation("Memory bank " + String(bank) + " SA" + String(sa) + " not readable (" +
+                    (err ? "DTR" + String(err == 1 ? "1" : "0") + " not confirmed" : rvName(first)) + ")");
+    return;
+  }
+
+  int count = first + 1;
+  if (count > 64) count = 64;
+  m.bytes[0] = first;
+  if (count > 1) dali.read_memory((uint8_t)bank, 1, m.bytes + 1, count - 1, (uint8_t)sa);
+  m.count = count;
+  memDump = m;
+  memSeq++;
+
+  String report = "MEMORY BANK " + String(bank) + " SA" + String(sa) + "\n";
+  for (int row = 0; row < count; row += 16) {
+    char b[8];
+    snprintf(b, sizeof(b), "%02X:", row);
+    String line = b;
+    for (int i = row; i < row + 16 && i < count; i++) {
+      if (m.bytes[i] < 0) line += " --";
+      else { snprintf(b, sizeof(b), " %02X", m.bytes[i]); line += b; }
+    }
+    addLog(line);
+    report += line + "\n";
+  }
+  lastReport = report;
+  finishOperation("Memory bank " + String(bank) + " SA" + String(sa) + ": " + String(count) + " byte(s)");
+}
+
+void resetDevice(int sa) {
+  setOperation("Reset SA" + String(sa));
+  dali.cmd(DALI_RESET, sa); // send-twice command
+  delay(400);               // gear may need up to 300 ms after RESET
+  int16_t rs = dali.cmd(DALI_QUERY_RESET_STATE, sa);
+  addLog("RESET SA" + String(sa) + ", QUERY RESET STATE -> " + String(rs) + " (" + rvName(rs) + ")");
+  finishOperation(rs == 0xFF ? "SA" + String(sa) + " reset to factory settings (short address kept)"
+                             : "RESET sent to SA" + String(sa) + ", reset state not confirmed");
+}
+
+uint8_t setFade(bool time, uint8_t v, int sa) {
+  if (dali.set_dtr0(v, sa)) return 1;
+  dali.cmd(time ? DALI_SET_FADE_TIME : DALI_SET_FADE_RATE, sa);
+  int16_t ftr = dali.cmd(DALI_QUERY_FADE_TIME_FADE_RATE, sa);
+  if (ftr < 0) return 2;
+  uint8_t got = time ? ((ftr >> 4) & 0x0F) : (ftr & 0x0F);
+  return got == v ? 0 : 2;
+}
+
+String configResult(const char* name, int value, uint8_t r) {
+  String s = String(name) + "=" + String(value) + ": ";
+  if (r == 0) s += "OK";
+  else if (r == 1) s += "FAILED (DTR0 not confirmed)";
+  else s += "FAILED (value not confirmed)";
+  addLog(s);
+  return s;
+}
+
+// p: 0 min, 1 max, 2 power-on, 3 system failure, 4 fade time, 5 fade rate (-1 = unchanged)
+void configDevice(int sa, const int16_t* p) {
+  setOperation("Configure SA" + String(sa));
+  int failed = 0;
+  // max first, so that raising min above the old max works
+  if (p[1] >= 0 && configResult("max", p[1], dali.set_max_level(p[1], sa)).indexOf("FAILED") >= 0) failed++;
+  if (p[0] >= 0 && configResult("min", p[0], dali.set_min_level(p[0], sa)).indexOf("FAILED") >= 0) failed++;
+  if (p[2] >= 0 && configResult("power-on", p[2], dali.set_power_on_level(p[2], sa)).indexOf("FAILED") >= 0) failed++;
+  if (p[3] >= 0 && configResult("system failure", p[3], dali.set_system_failure_level(p[3], sa)).indexOf("FAILED") >= 0) failed++;
+  if (p[4] >= 0 && configResult("fade time", p[4], setFade(true, p[4], sa)).indexOf("FAILED") >= 0) failed++;
+  if (p[5] >= 0 && configResult("fade rate", p[5], setFade(false, p[5], sa)).indexOf("FAILED") >= 0) failed++;
+
+  DeviceInfo& d = devices[sa];
+  d.minLevel = dali.cmd(DALI_QUERY_MIN_LEVEL, sa);
+  d.maxLevel = dali.cmd(DALI_QUERY_MAX_LEVEL, sa);
+  d.powerOnLevel = dali.cmd(DALI_QUERY_POWER_ON_LEVEL, sa);
+  d.systemFailureLevel = dali.cmd(DALI_QUERY_SYSTEM_FAILURE_LEVEL, sa);
+  d.fadeTimeRate = dali.cmd(DALI_QUERY_FADE_TIME_FADE_RATE, sa);
+  finishOperation(failed ? "Configure SA" + String(sa) + ": " + String(failed) + " value(s) not applied"
+                         : "Configure SA" + String(sa) + ": OK");
+}
+
+void setGroups(int sa, uint16_t wanted) {
+  setOperation("Groups SA" + String(sa));
+  int16_t g07 = dali.cmd(DALI_QUERY_GROUPS_0_7, sa);
+  int16_t g815 = dali.cmd(DALI_QUERY_GROUPS_8_15, sa);
+  if (g07 < 0 || g815 < 0) {
+    finishOperation("Groups SA" + String(sa) + ": cannot read current groups (" + rvName(g07 < 0 ? g07 : g815) + ")");
+    return;
+  }
+  uint16_t current = (uint16_t)g07 | ((uint16_t)g815 << 8);
+  for (int g = 0; g < 16; g++) {
+    bool want = wanted & (1 << g);
+    if (want == (bool)(current & (1 << g))) continue;
+    dali.cmd((want ? DALI_ADD_TO_GROUP0 : DALI_REMOVE_FROM_GROUP0) + g, sa);
+    addLog("SA" + String(sa) + (want ? " ADD TO GROUP " : " REMOVE FROM GROUP ") + String(g));
+  }
+  devices[sa].groups07 = dali.cmd(DALI_QUERY_GROUPS_0_7, sa);
+  devices[sa].groups815 = dali.cmd(DALI_QUERY_GROUPS_8_15, sa);
+  uint16_t now = (uint16_t)devices[sa].groups07 | ((uint16_t)devices[sa].groups815 << 8);
+  bool ok = devices[sa].groups07 >= 0 && devices[sa].groups815 >= 0 && now == wanted;
+  finishOperation(ok ? "Groups SA" + String(sa) + " saved" : "Groups SA" + String(sa) + ": not confirmed by the gear");
+}
+
+// p[n]: -1 unchanged, 255 remove from scene, 0..254 scene level
+void setScenes(int sa, const int16_t* p) {
+  setOperation("Scenes SA" + String(sa));
+  int failed = 0, changed = 0;
+  for (int n = 0; n < 16; n++) {
+    if (p[n] < 0) continue;
+    changed++;
+    if (p[n] == 255) {
+      dali.cmd(DALI_REMOVE_FROM_SCENE0 + n, sa);
+    } else if (dali.set_dtr0(p[n], sa) == 0) {
+      dali.cmd(DALI_SET_SCENE0 + n, sa);
+    }
+    int16_t v = dali.cmd(DALI_QUERY_SCENE0_LEVEL + n, sa);
+    devices[sa].scenes[n] = v;
+    bool ok = v == p[n];
+    if (!ok) failed++;
+    addLog("SA" + String(sa) + " scene " + String(n) + " = " + (p[n] == 255 ? String("MASK") : String(p[n])) +
+           (ok ? ": OK" : ": FAILED, gear reports " + String(v)));
+    progressPct = (uint8_t)((n + 1) * 100 / 16);
+  }
+  finishOperation("Scenes SA" + String(sa) + ": " + String(changed - failed) + "/" + String(changed) + " saved");
+}
+
+String targetName(int adr) {
+  if (adr == 0x7F) return "BROADCAST";
+  if (adr >= 0x40) return "GROUP " + String(adr & 0x0F);
+  return "SA" + String(adr);
+}
+
+// adr: 0..63 short address, 0x40|g group, 0x7F broadcast
+// action: 0 off, 1 recall max, 2 recall min, 3 level=value, 4 go to scene value
+void targetControl(int adr, int action, int value) {
+  String name = targetName(adr);
+  setOperation(name);
+  String what;
+  switch (action) {
+    case 0: dali.cmd(DALI_OFF, adr); what = "OFF"; break;
+    case 1: dali.cmd(DALI_RECALL_MAX_LEVEL, adr); what = "RECALL MAX LEVEL"; break;
+    case 2: dali.cmd(DALI_RECALL_MIN_LEVEL, adr); what = "RECALL MIN LEVEL"; break;
+    case 3: dali.set_level((uint8_t)value, adr); what = "LEVEL " + String(value); break;
+    case 4: dali.cmd(DALI_GO_TO_SCENE0 + value, adr); what = "GO TO SCENE " + String(value); break;
+  }
+  addLog(name + " -> " + what);
+  finishOperation(name + " " + what + " sent");
+}
+
+void scanRounds(int rounds) {
+  for (int r = 0; r < rounds; r++) {
+    addLog("Repeated scan round " + String(r + 1) + "/" + String(rounds));
+    scanBus(false, false);
+    if (r + 1 < rounds) delay(1000);
+  }
+  finishOperation("Repeated scan: " + String(rounds) + " round(s), see Scan statistics");
+}
+
+// ============================================================
 // Worker task
 // ============================================================
 
 void operationTask(void* parameter) {
   PendingOp op = pendingOp;
 
+  xSemaphoreTake(busMutex, portMAX_DELAY);
   switch (op.type) {
     case OP_SCAN:              scanBus(false); break;
     case OP_SCAN_DETAILED:     scanBus(true); break;
@@ -961,23 +1493,43 @@ void operationTask(void* parameter) {
     case OP_BROADCAST_OFF:     setBroadcastLevel(0); break;
     case OP_SET_TC:            setDeviceTc(op.sa, (uint16_t)op.value); break;
     case OP_BROADCAST_TC:      setBroadcastTc((uint16_t)op.value); break;
+    case OP_PRESENCE_TEST:     presenceTest(); break;
+    case OP_RAW:               rawCommand((uint32_t)op.value, op.value2, op.p[0] == 1, op.p[1], op.p[2]); break;
+    case OP_DIM_TEST:          dimTest(op.sa); break;
+    case OP_TC_TEST:           tcTest(op.sa); break;
+    case OP_MEMORY:            readMemoryBank(op.sa, op.value); break;
+    case OP_RESET_DEVICE:      resetDevice(op.sa); break;
+    case OP_CONFIG:            configDevice(op.sa, op.p); break;
+    case OP_GROUPS:            setGroups(op.sa, (uint16_t)op.value); break;
+    case OP_SCENES:            setScenes(op.sa, op.p); break;
+    case OP_TARGET:            targetControl(op.sa, op.value, op.value2); break;
+    case OP_SCAN_ROUNDS:       scanRounds(op.value); break;
     default:
       finishOperation("No operation");
       break;
   }
+  xSemaphoreGive(busMutex);
 
   vTaskDelete(nullptr);
 }
 
 bool startOperation(OpType type, int sa = -1, uint64_t mask = 0, int value = 0) {
+  requestOp = PendingOp();
+  requestOp.type = type;
+  requestOp.sa = sa;
+  requestOp.mask = mask;
+  requestOp.value = value;
+  return startRequested();
+}
+
+// Starts requestOp. Struct parameters are avoided because the Arduino builder
+// places generated prototypes above the struct definitions.
+bool startRequested() {
   if (busy) return false;
 
   busy = true;
   progressPct = 0;
-  pendingOp.type = type;
-  pendingOp.sa = sa;
-  pendingOp.mask = mask;
-  pendingOp.value = value;
+  pendingOp = requestOp;
 
   BaseType_t ok = xTaskCreate(
     operationTask,
@@ -1064,6 +1616,27 @@ void handleState() {
   j += ",\"lastResult\":\"" + jsonEscape(resultCopy) + "\"";
   j += ",\"found\":" + String(countDevices());
   j += ",\"log\":\"" + jsonEscape(logCopy) + "\"";
+  j += ",\"scanDiff\":\"" + jsonEscape(lastScanDiff) + "\"";
+  j += ",\"autoScan\":" + String(autoScanMinutes);
+  j += ",\"statRounds\":" + String(statRounds);
+  j += ",\"traceSeq\":" + String(traceSeq);
+  j += ",\"scopeSeq\":" + String(scopeSeq);
+  j += ",\"memSeq\":" + String(memSeq);
+
+  // Addresses that ever answered during the collected scan rounds
+  j += ",\"stats\":[";
+  bool firstStat = true;
+  for (int sa = 0; sa < 64; sa++) {
+    SaStats &st = saStats[sa];
+    if (!st.ok && !st.invalid && !st.collision) continue;
+    if (!firstStat) j += ",";
+    firstStat = false;
+    j += "{\"sa\":" + String(sa) + ",\"ok\":" + String(st.ok) +
+         ",\"invalid\":" + String(st.invalid) + ",\"collision\":" + String(st.collision) +
+         ",\"label\":\"" + jsonEscape(labels[sa]) + "\"}";
+  }
+  j += "]";
+
   j += ",\"devices\":[";
 
   bool first = true;
@@ -1080,6 +1653,9 @@ void handleState() {
     j += ",\"type\":" + String(d.deviceType);
     j += ",\"version\":" + String(d.version);
     j += ",\"groups\":\"" + groupsString(d.groups07, d.groups815) + "\"";
+    j += ",\"groups07\":" + String(d.groups07);
+    j += ",\"groups815\":" + String(d.groups815);
+    j += ",\"label\":\"" + jsonEscape(labels[sa]) + "\"";
     j += ",\"replyValid\":"; j += d.replyValid ? "true" : "false";
     j += ",\"inspected\":"; j += d.inspected ? "true" : "false";
     j += ",\"tc\":" + String(d.tc);
@@ -1205,6 +1781,54 @@ void setupHttp() {
       if (mirek < 100 || mirek > 1000) return server.send(400, "text/plain", "mirek must be 100..1000");
       sendBusyOrStarted(startOperation(OP_SET_TC, sa, 0, mirek));
     }
+    else if (cmd == "dimtest") sendBusyOrStarted(startOperation(OP_DIM_TEST, sa));
+    else if (cmd == "tctest") sendBusyOrStarted(startOperation(OP_TC_TEST, sa));
+    else if (cmd == "reset") sendBusyOrStarted(startOperation(OP_RESET_DEVICE, sa));
+    else if (cmd == "memory") {
+      int bank = server.hasArg("bank") ? server.arg("bank").toInt() : -1;
+      if (bank < 0 || bank > 255) return server.send(400, "text/plain", "bank must be 0..255");
+      sendBusyOrStarted(startOperation(OP_MEMORY, sa, 0, bank));
+    }
+    else if (cmd == "groups") {
+      long mask = server.hasArg("mask") ? server.arg("mask").toInt() : -1;
+      if (mask < 0 || mask > 0xFFFF) return server.send(400, "text/plain", "mask must be 0..65535");
+      sendBusyOrStarted(startOperation(OP_GROUPS, sa, 0, (int)mask));
+    }
+    else if (cmd == "config") {
+      // empty or missing = unchanged
+      static const char* names[6] = {"min", "max", "pon", "sf", "ft", "fr"};
+      static const int lo[6] = {1, 1, 0, 0, 0, 1};
+      static const int hi[6] = {254, 254, 255, 255, 15, 15};
+      requestOp = PendingOp();
+      requestOp.type = OP_CONFIG;
+      requestOp.sa = sa;
+      for (int i = 0; i < 6; i++) {
+        String v = server.arg(names[i]);
+        v.trim();
+        if (!v.length()) continue;
+        int n = v.toInt();
+        if (n < lo[i] || n > hi[i]) return server.send(400, "text/plain", String(names[i]) + " out of range");
+        requestOp.p[i] = n;
+      }
+      sendBusyOrStarted(startRequested());
+    }
+    else if (cmd == "scenes") {
+      // s0..s15: empty = unchanged, "mask" = remove from scene, 0..254 = level
+      requestOp = PendingOp();
+      requestOp.type = OP_SCENES;
+      requestOp.sa = sa;
+      for (int n = 0; n < 16; n++) {
+        String v = server.arg("s" + String(n));
+        v.trim();
+        v.toLowerCase();
+        if (!v.length()) continue;
+        if (v == "mask") { requestOp.p[n] = 255; continue; }
+        int lvl = v.toInt();
+        if (lvl < 0 || lvl > 254 || (lvl == 0 && v != "0")) return server.send(400, "text/plain", "scene " + String(n) + " must be 0..254 or mask");
+        requestOp.p[n] = lvl;
+      }
+      sendBusyOrStarted(startRequested());
+    }
     else server.send(400, "text/plain", "Unknown cmd");
   });
 
@@ -1251,6 +1875,147 @@ void setupHttp() {
     server.send(200, "text/plain; charset=utf-8", r);
   });
 
+  server.on("/api/presence", HTTP_POST, [](){
+    sendBusyOrStarted(startOperation(OP_PRESENCE_TEST));
+  });
+
+  // Raw forward frame: frame=hex (4 digits = 16 bit, 6 digits = 24 bit), reply=0|1, repeat=1..50, capture=0|samples
+  server.on("/api/raw", HTTP_POST, [](){
+    String hex = server.arg("frame");
+    hex.trim();
+    hex.replace(" ", "");
+    if (hex.length() != 4 && hex.length() != 6) return server.send(400, "text/plain", "Frame must be 4 or 6 hex digits");
+    for (size_t i = 0; i < hex.length(); i++) {
+      if (!isxdigit((unsigned char)hex[i])) return server.send(400, "text/plain", "Frame must be hexadecimal");
+    }
+    int repeat = server.hasArg("repeat") ? server.arg("repeat").toInt() : 1;
+    if (repeat < 1 || repeat > 50) return server.send(400, "text/plain", "repeat must be 1..50");
+    int capture = server.hasArg("capture") ? server.arg("capture").toInt() : 0;
+    if (capture < 0 || capture > SCOPE_MAX_SAMPLES) return server.send(400, "text/plain", "capture must be 0..4096");
+
+    requestOp = PendingOp();
+    requestOp.type = OP_RAW;
+    requestOp.value = (int)strtoul(hex.c_str(), nullptr, 16);
+    requestOp.value2 = hex.length() * 4;
+    requestOp.p[0] = server.arg("reply") == "1" ? 1 : 0;
+    requestOp.p[1] = repeat;
+    requestOp.p[2] = capture;
+    sendBusyOrStarted(startRequested());
+  });
+
+  // Commands to a short address, a group or broadcast
+  // adr: 0..63 SA, 64..79 group 0..15, 127 broadcast; action: off|max|min|level|scene; value: level or scene
+  server.on("/api/target", HTTP_POST, [](){
+    int adr = server.hasArg("adr") ? server.arg("adr").toInt() : -1;
+    if (!((adr >= 0 && adr <= 0x4F) || adr == 0x7F)) return server.send(400, "text/plain", "Invalid target");
+    String action = server.arg("action");
+    int value = server.arg("value").toInt();
+    int a;
+    if (action == "off") a = 0;
+    else if (action == "max") a = 1;
+    else if (action == "min") a = 2;
+    else if (action == "level") {
+      a = 3;
+      if (value < 0 || value > 254) return server.send(400, "text/plain", "level must be 0..254");
+    } else if (action == "scene") {
+      a = 4;
+      if (value < 0 || value > 15) return server.send(400, "text/plain", "scene must be 0..15");
+    } else return server.send(400, "text/plain", "Unknown action");
+
+    requestOp = PendingOp();
+    requestOp.type = OP_TARGET;
+    requestOp.sa = adr;
+    requestOp.value = a;
+    requestOp.value2 = value;
+    sendBusyOrStarted(startRequested());
+  });
+
+  server.on("/api/scan-rounds", HTTP_POST, [](){
+    int rounds = server.arg("rounds").toInt();
+    if (rounds < 1 || rounds > 100) return server.send(400, "text/plain", "rounds must be 1..100");
+    sendBusyOrStarted(startOperation(OP_SCAN_ROUNDS, -1, 0, rounds));
+  });
+
+  server.on("/api/autoscan", HTTP_POST, [](){
+    int minutes = server.arg("minutes").toInt();
+    if (minutes < 0 || minutes > 1440) return server.send(400, "text/plain", "minutes must be 0..1440");
+    autoScanMinutes = minutes;
+    lastAutoScanMs = millis();
+    prefs.putUInt("autoscan", autoScanMinutes);
+    addLog(minutes ? "Auto-scan every " + String(minutes) + " min" : String("Auto-scan off"));
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/stats/reset", HTTP_POST, [](){
+    for (int sa = 0; sa < 64; sa++) saStats[sa] = SaStats();
+    statRounds = 0;
+    addLog("Scan statistics cleared");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/label", HTTP_POST, [](){
+    int sa = getSaArg();
+    if (sa < 0) return server.send(400, "text/plain", "Invalid SA");
+    String text = server.arg("text");
+    text.trim();
+    if (text.length() > 40) text = text.substring(0, 40);
+    labels[sa] = text;
+    String key = "l" + String(sa);
+    if (text.length()) prefs.putString(key.c_str(), text);
+    else prefs.remove(key.c_str());
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Bus trace entries newer than ?since=<seq>
+  server.on("/api/trace", HTTP_GET, [](){
+    uint32_t since = server.arg("since").toInt();
+    String j;
+    j.reserve(16000);
+    xSemaphoreTake(traceMutex, portMAX_DELAY);
+    uint32_t last = traceSeq;
+    uint32_t from = since + 1;
+    if (last >= (uint32_t)TRACE_SIZE && from < last - TRACE_SIZE + 1) from = last - TRACE_SIZE + 1;
+    j += "{\"seq\":" + String(last) + ",\"entries\":[";
+    for (uint32_t s = from; s <= last && s > 0; s++) {
+      TraceEntry &e = traceBuf[(s - 1) % TRACE_SIZE];
+      if (s != from) j += ",";
+      j += "{\"s\":" + String(e.seq) + ",\"t\":" + String((double)e.us / 1000.0, 3) +
+           ",\"k\":" + String(e.kind) + ",\"b\":" + String(e.bits) +
+           ",\"d\":\"" + hexBytes(e.data, e.bits > 32 ? 4 : (e.bits + 7) / 8) + "\",\"rv\":" + String(e.rv) + "}";
+    }
+    xSemaphoreGive(traceMutex);
+    j += "]}";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/api/scope", HTTP_GET, [](){
+    String j;
+    j.reserve(1300);
+    j += "{\"seq\":" + String(scopeSeq) + ",\"rate\":9604,\"samples\":" + String(scopeSamples);
+    j += ",\"txStart\":" + String(scopeTxStart) + ",\"txEnd\":" + String(scopeTxEnd);
+    j += ",\"title\":\"" + jsonEscape(scopeTitle) + "\",\"data\":\"" + hexBytes(scopeBuf, (scopeSamples + 7) / 8) + "\"}";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/api/memory", HTTP_GET, [](){
+    String j = "{\"seq\":" + String(memSeq) + ",\"sa\":" + String(memDump.sa) + ",\"bank\":" + String(memDump.bank) + ",\"bytes\":[";
+    for (int i = 0; i < memDump.count; i++) {
+      if (i) j += ",";
+      j += String(memDump.bytes[i]);
+    }
+    j += "]}";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/api/log", HTTP_GET, [](){
+    String copy;
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+    copy = logText;
+    if (stateMutex) xSemaphoreGive(stateMutex);
+    server.sendHeader("Content-Disposition", "attachment; filename=\"dali-log.txt\"");
+    server.send(200, "text/plain; charset=utf-8", copy);
+  });
+
   server.onNotFound([](){
     server.send(404, "text/plain", "Not found");
   });
@@ -1293,6 +2058,12 @@ void setupWifi() {
 void setup() {
   Serial.begin(115200);
   stateMutex = xSemaphoreCreateMutex();
+  busMutex = xSemaphoreCreateMutex();
+  traceMutex = xSemaphoreCreateMutex();
+
+  prefs.begin("dali-tool", false);
+  for (int sa = 0; sa < 64; sa++) labels[sa] = prefs.getString(("l" + String(sa)).c_str(), "");
+  autoScanMinutes = prefs.getUInt("autoscan", 0);
   delay(1500);
 
   Serial.println();
@@ -1317,6 +2088,9 @@ void setup() {
   timerAttachInterrupt(daliTimer, &onDaliTimer);
   timerAlarm(daliTimer, 833, true, 0);
 
+  dali.trace_cb = traceAdd;
+  xTaskCreate(monitorTask, "daliMonitor", 3072, nullptr, 1, nullptr);
+
   setupWifi();
   setupHttp();
 
@@ -1327,5 +2101,11 @@ void setup() {
 
 void loop() {
   server.handleClient();
+
+  if (autoScanMinutes && !busy && millis() - lastAutoScanMs >= autoScanMinutes * 60000UL) {
+    lastAutoScanMs = millis();
+    if (startOperation(OP_SCAN)) addLog("Auto-scan started");
+  }
+
   delay(2);
 }

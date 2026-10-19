@@ -46,6 +46,29 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
 .tc input[type=range]:disabled{opacity:.45;cursor:not-allowed}
 .tc .tc-k{min-width:52px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 @media(max-width:900px){.device-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}
+.lbl{color:var(--muted);font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edit-btn{padding:2px 6px;font-size:11px;margin-left:4px}
+.flags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.flag{padding:2px 6px;border-radius:6px;font-size:11px;border:1px solid #3b4552;color:#c6cfdb}
+.flag.bad{border-color:#8b4141;color:var(--red)}.flag.warn{border-color:#7a6230;color:var(--amber)}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.sub-h{margin:16px 0 8px;color:#8f9aaa;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.form-row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.form-row label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.form-row input{width:82px;padding:6px 8px}
+.chk-grid{display:grid;grid-template-columns:repeat(8,auto);gap:6px 14px;justify-content:start}
+.chk-grid label{display:flex;gap:5px;align-items:center;font-size:13px}
+.scene-grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px 14px}
+.scene-grid label{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+.scene-grid input{width:64px;padding:5px 7px}
+.scene-grid button{padding:4px 8px}
+@media(max-width:900px){.scene-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}.chk-grid{grid-template-columns:repeat(4,auto)}}
+.mono{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.hexdump{background:#0b0d10;border:1px solid #262c34;border-radius:10px;padding:10px 12px;overflow:auto;white-space:pre}
+.scroll-table{max-height:380px;overflow:auto;border:1px solid #262c34;border-radius:10px}
+.scroll-table table{font-size:12px}.scroll-table th{position:sticky;top:0;background:var(--card)}
+.k-tx{color:#8fc1ff}.k-reply{color:var(--green)}.k-foreign{color:var(--amber)}.k-err{color:var(--red)}
+canvas{width:100%;height:150px;background:#0b0d10;border:1px solid #262c34;border-radius:10px;display:block}
 
 @media(max-width:760px){.grid{grid-template-columns:1fr}.full{grid-column:auto}table{display:block;overflow:auto}}
 </style>
@@ -75,6 +98,20 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
         <button onclick="downloadReport()">Download report</button>
       </div>
       <p class="muted small">Scan uses QUERY STATUS on SA0…SA63. Detailed Scan also reads level, device type, version and group membership.</p>
+      <div class="small">Compared with previous scan: <b id="scanDiff">—</b></div>
+      <div class="sep"></div>
+      <div class="row">
+        <label>Repeat</label>
+        <input id="scanRounds" type="number" min="1" max="100" value="10" style="width:75px">
+        <button class="op" onclick="scanRounds()">rounds <span class="help" data-tip="Runs the normal scan several times in a row and collects per-address statistics (see Scan statistics). Shows which luminaires disappear intermittently.">?</span></button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Auto-scan every</label>
+        <input id="autoScan" type="number" min="0" max="1440" value="0" style="width:75px">
+        <label>min</label>
+        <button onclick="setAutoScan()">Set <span class="help" data-tip="Runs a scan periodically while the tool is idle and adds it to the statistics. 0 turns auto-scan off. The interval is stored in the ESP32.">?</span></button>
+        <span class="small muted" id="autoScanState"></span>
+      </div>
     </section>
 
     <section class="card">
@@ -95,6 +132,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
     <section class="card">
       <h2>Diagnostics</h2>
       <div class="actions">
+        <button class="primary op" onclick="start('/api/presence')">BUS PRESENCE TEST <span class="help" data-tip="Broadcasts QUERY CONTROL GEAR PRESENT and QUERY MISSING SHORT ADDRESS five times each. Every powered gear answers, with or without a short address. No answer at all means a bus power or wiring problem, not an addressing problem.">?</span></button>
         <button class="op" onclick="start('/api/raw-compare')">RAW COMPARE ×20 <span class="help" data-tip="COMPARE is a commissioning query. Gear whose random address is at or below the current SEARCHADDR answers YES. Repeating it helps diagnose missing, invalid or colliding backward frames.">?</span></button>
       </div>
       <p class="muted small">INITIALISE 0xFF → RANDOMISE → SEARCHADDR FFFFFF → 20 raw COMPARE queries with NO REPLY / INVALID / COLLISION / YES statistics.</p>
@@ -157,10 +195,99 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
       </div>
     </section>
 
+    <section class="card">
+      <h2>Group / broadcast control <span class="help" data-tip="Sends one command to every gear of a DALI group or to all gear (broadcast). Use it to check group membership and scenes.">?</span></h2>
+      <div class="row">
+        <select id="tgtAdr"></select>
+        <button class="op" onclick="targetAction('off')">Off</button>
+        <button class="op" onclick="targetAction('max')">Max</button>
+        <button class="op" onclick="targetAction('min')">Min</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Level</label>
+        <input id="tgtLevel" type="number" min="0" max="254" value="128" style="width:80px">
+        <button class="op" onclick="targetAction('level')">Set</button>
+        <label style="margin-left:10px">Scene</label>
+        <select id="tgtScene"></select>
+        <button class="op" onclick="targetAction('scene')">Recall</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Scan statistics <span class="help" data-tip="Collected over every scan since the last reset. OK = valid reply, INVALID / COLLISION = bus activity without a clean frame. A luminaire with OK below the number of rounds was missed in some scans.">?</span></h2>
+      <div class="row" style="justify-content:space-between">
+        <span class="small muted">Rounds: <b id="statRounds">0</b></span>
+        <button onclick="resetStats()">Reset statistics</button>
+      </div>
+      <div class="scroll-table" style="margin-top:10px;max-height:260px">
+        <table><thead><tr><th>SA</th><th>Label</th><th>OK</th><th>INVALID</th><th>COLLISION</th><th>Missed</th></tr></thead>
+        <tbody id="statsBody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="card full">
+      <h2>Raw command &amp; waveform <span class="help" data-tip="Sends any forward frame and optionally records the RX pin at 9600 samples/s. The shaded area is our own transmission; any low level after it is a reply from the gear.">?</span></h2>
+      <div class="row">
+        <select id="rawPreset" onchange="applyPreset()"></select>
+        <label>Frame (hex)</label>
+        <input id="rawFrame" class="mono" value="FF91" style="width:110px">
+        <label><input id="rawReply" type="checkbox" checked> expect reply</label>
+        <label>Repeat</label>
+        <input id="rawRepeat" type="number" min="1" max="50" value="1" style="width:70px">
+        <label><input id="rawCapture" type="checkbox" checked> record waveform</label>
+        <select id="rawSamples">
+          <option value="1024">107 ms</option>
+          <option value="2048" selected>213 ms</option>
+          <option value="4096">427 ms</option>
+        </select>
+        <button class="primary op" onclick="sendRaw()">Send</button>
+      </div>
+      <p class="small muted">4 hex digits = 16-bit frame (address byte + opcode), 6 digits = 24-bit frame. Examples: FF91 broadcast QUERY CONTROL GEAR PRESENT, 0190 QUERY STATUS of SA0, FE80 broadcast level 128.</p>
+      <div class="row" style="justify-content:space-between;margin-top:6px">
+        <span class="small" id="scopeInfo">No waveform recorded yet.</span>
+        <span class="row">
+          <label class="small">Window</label>
+          <select id="scopeWindow" onchange="drawScope()">
+            <option value="25">25 ms</option>
+            <option value="50" selected>50 ms</option>
+            <option value="100">100 ms</option>
+            <option value="0">all</option>
+          </select>
+          <label class="small">Start</label>
+          <input id="scopeOffset" type="range" min="0" max="0" value="0" oninput="drawScope()" style="width:180px;padding:0">
+        </span>
+      </div>
+      <canvas id="scope" style="margin-top:8px"></canvas>
+    </section>
+
+    <section class="card full">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Bus monitor <span class="help" data-tip="Every frame on the bus: TX = sent by this tool, REPLY = answer to our query, BUS = frame from another participant (another controller, sensor, push button) or a late reply. Time is when the frame was finished; Δ is the gap to the previous entry.">?</span></h2>
+        <div class="actions">
+          <label class="small"><input id="monPause" type="checkbox"> pause</label>
+          <label class="small"><input id="monForeign" type="checkbox" onchange="renderMonitor()"> only BUS frames</label>
+          <button onclick="clearMonitor()">Clear</button>
+        </div>
+      </div>
+      <div class="scroll-table" style="margin-top:12px" id="monWrap">
+        <table><thead><tr><th>#</th><th>Time, ms</th><th>Δ, ms</th><th>Kind</th><th>Frame</th><th>Meaning</th></tr></thead>
+        <tbody id="monBody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="card full" id="memCard" style="display:none">
+      <h2 id="memTitle">Memory bank</h2>
+      <div id="memDecoded"></div>
+      <div class="hexdump mono" id="memDump" style="margin-top:10px"></div>
+    </section>
+
     <section class="card full">
       <div class="row" style="justify-content:space-between">
         <h2 style="margin:0">Log</h2>
-        <button onclick="clearLog()">Clear log</button>
+        <div class="actions">
+          <button onclick="location.href='/api/log'">Download log</button>
+          <button onclick="clearLog()">Clear log</button>
+        </div>
       </div>
       <pre class="log" id="log"></pre>
       <div class="small muted" id="lastResult"></div>
@@ -171,6 +298,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
 
 <script>
 let lastLog = "";
+let lastDevices = [];
 const selectedSAs = new Set();
 const expandedSAs = new Set();
 const autoExpandAfterInspect = new Set();
@@ -368,14 +496,92 @@ function sceneHtml(scenes){
   }).join("");
 }
 
+const STATUS_BITS = [
+  ["gear failure","bad"], ["lamp failure","bad"], ["lamp on",""], ["limit error","warn"],
+  ["fade running",""], ["reset state","warn"], ["no short address","warn"], ["power cycle seen","warn"]
+];
+
+function statusFlags(v){
+  if(v===null || v===undefined || v<0) return "";
+  return STATUS_BITS.map((f,i)=> (v & (1<<i)) ? `<span class="flag ${f[1]}">${f[0]}</span>` : "").join("");
+}
+
+function inputVal(v){
+  return (v===null || v===undefined || v<0) ? "" : v;
+}
+
+function deviceTools(d){
+  const sa=d.sa;
+  return `<div class="tools">
+    <button class="op" onclick="deviceAction(${sa},'dimtest')">Dimming test <span class="help" data-tip="Steps the level from minimum to maximum, waits for each fade to finish and compares QUERY ACTUAL LEVEL with the requested level. Restores the previous level.">?</span></button>
+    <button class="op" onclick="deviceAction(${sa},'tctest')">Tc test <span class="help" data-tip="Reads DT8 colour features and limits, steps the colour temperature from cold to warm and compares the reported value with the requested one. Restores the previous value.">?</span></button>
+    <button class="op" onclick="readMemory(${sa},0)">Identity <span class="help" data-tip="Reads memory bank 0: GTIN, firmware and hardware version, serial number, DALI part versions.">?</span></button>
+    <select id="bankSel${sa}">
+      <option value="1">Bank 1 (luminaire info)</option>
+      <option value="202">Bank 202</option><option value="203">Bank 203</option><option value="204">Bank 204</option>
+      <option value="205">Bank 205</option><option value="206">Bank 206</option><option value="207">Bank 207</option>
+    </select>
+    <button class="op" onclick="readMemory(${sa},Number(document.getElementById('bankSel${sa}').value))">Read bank <span class="help" data-tip="Raw dump of a memory bank. D4i / DALI-2 drivers keep energy reporting and diagnostics (operating time, start counter, temperature, voltages, failures) in banks 202–207. Banks the gear does not implement are reported as not readable.">?</span></button>
+    <button class="danger op" onclick="resetDevice(${sa})">Reset <span class="help" data-tip="DALI RESET: restores factory levels, fade, groups and scenes. The short address is kept.">?</span></button>
+  </div>`;
+}
+
+function configForm(d){
+  const sa=d.sa;
+  const ft = d.fadeTimeRate>=0 ? (d.fadeTimeRate>>4)&15 : "";
+  const fr = d.fadeTimeRate>=0 ? d.fadeTimeRate&15 : "";
+  const f=(id,label,v,min,max,tip)=>`<label><span>${label} <span class="help" data-tip="${tip}">?</span></span><input id="${id}${sa}" type="number" min="${min}" max="${max}" value="${v}"></label>`;
+  return `<div class="sub-h">Settings</div>
+    <div class="form-row">
+      ${f("cfgMin","Min level",inputVal(d.minLevel),1,254,"Lowest level the gear will dim to (not below physical minimum).")}
+      ${f("cfgMax","Max level",inputVal(d.maxLevel),1,254,"Highest level the gear will go to.")}
+      ${f("cfgPon","Power-on",inputVal(d.powerOnLevel),0,255,"Level after mains power is applied. 255 = MASK (last level).")}
+      ${f("cfgSf","System failure",inputVal(d.systemFailureLevel),0,255,"Level when the DALI bus is lost. 255 = MASK (no change).")}
+      ${f("cfgFt","Fade time",ft,0,15,"0 = no fade, 1..15 = 0.7 s … 90.5 s.")}
+      ${f("cfgFr","Fade rate",fr,1,15,"Steps per second for UP/DOWN commands: 1 = 358, 15 = 2.8.")}
+      <button class="op" onclick="saveConfig(${sa})">Save settings</button>
+    </div>`;
+}
+
+function groupsForm(d){
+  if(d.groups07<0 || d.groups815<0 || d.groups07===undefined) return "";
+  const mask = d.groups07 | (d.groups815<<8);
+  let boxes="";
+  for(let g=0; g<16; g++){
+    boxes+=`<label><input type="checkbox" id="grp${d.sa}_${g}" ${mask & (1<<g) ? "checked":""}> G${g}</label>`;
+  }
+  return `<div class="sub-h">Groups</div>
+    <div class="row"><div class="chk-grid">${boxes}</div>
+    <button class="op" onclick="saveGroups(${d.sa})">Save groups</button></div>`;
+}
+
+function scenesForm(d){
+  if(!Array.isArray(d.scenes)) return "";
+  let cells="";
+  d.scenes.forEach((v,i)=>{
+    const shown = (v===255 || v<0) ? "" : v;
+    const orig = v===255 ? "mask" : (v<0 ? "" : String(v));
+    cells+=`<label>S${i}
+      <input id="scn${d.sa}_${i}" data-orig="${orig}" value="${shown}" placeholder="${v===255?"mask":"—"}">
+      <button class="op" title="Recall scene ${i}" onclick="sceneRecall(${d.sa},${i})">▶</button></label>`;
+  });
+  return `<div class="sub-h">Scenes <span class="help" data-tip="Level 0..254 stored per scene. Empty = MASK (luminaire is not part of the scene). ▶ recalls the scene on this luminaire only.">?</span></div>
+    <div class="scene-grid">${cells}</div>
+    <div style="margin-top:10px"><button class="op" onclick="saveScenes(${d.sa})">Save scenes</button></div>`;
+}
+
 function detailCard(d){
+  const open = expandedSAs.has(d.sa) ? "open" : "";
   if(!d.inspected){
-    return `<div class="device-card ${expandedSAs.has(d.sa)?"open":""}" id="deviceCard${d.sa}">
-      <div class="muted small">No extended data loaded. Click <b>Inspect</b>.</div>
+    return `<div class="device-card ${open}" id="deviceCard${d.sa}">
+      ${deviceTools(d)}
+      ${groupsForm(d)}
+      <div class="muted small" style="margin-top:10px">No extended data loaded. Click <b>Inspect</b> to see and edit settings and scenes.</div>
     </div>`;
   }
 
-  return `<div class="device-card ${expandedSAs.has(d.sa)?"open":""}" id="deviceCard${d.sa}">
+  return `<div class="device-card ${open}" id="deviceCard${d.sa}">
+    ${deviceTools(d)}
     <div class="device-grid">
       <div class="device-field"><span class="k">Actual level</span><span class="v">${val(d.level)}</span></div>
       <div class="device-field"><span class="k">Physical minimum</span><span class="v">${val(d.physicalMin)}</span></div>
@@ -399,19 +605,15 @@ function detailCard(d){
 
       <div class="device-field"><span class="k">Power failure flag</span><span class="v">${yesNo(d.powerFailure)}</span></div>
       <div class="device-field"><span class="k">Groups</span><span class="v">${d.groups}</span></div>
-      <div class="device-field"><span class="k">Status</span><span class="v">${statusText(d)}</span></div>
+      <div class="device-field"><span class="k">Status</span><span class="v">${statusText(d)}<span class="flags">${statusFlags(d.status)}</span></span></div>
 
       <div class="device-field"><span class="k">Colour temperature</span><span class="v">${tcText(d.tc)}</span></div>
       <div class="device-field"><span class="k">Tc coolest</span><span class="v">${tcText(d.tcCoolest)}</span></div>
       <div class="device-field"><span class="k">Tc warmest</span><span class="v">${tcText(d.tcWarmest)}</span></div>
     </div>
-    <div style="margin-top:15px">
-      <div class="small muted">Scenes 0–15 <span class="help" data-tip="Scene value is the stored arc level for that DALI scene. MASK means the scene is not programmed.">?</span></div>
-      <div class="scene-list">${sceneHtml(d.scenes)}</div>
-    </div>
-    <div class="small muted" style="margin-top:14px">
-      Colour temperature is shown only for DT8 gear. Memory Bank 0 identity is not decoded in this build yet.
-    </div>
+    ${configForm(d)}
+    ${groupsForm(d)}
+    ${scenesForm(d)}
   </div>`;
 }
 
@@ -473,50 +675,435 @@ function tcText(v){
   return validMirek(v) ? `${kelvin(v)} K (${v} mirek)` : "—";
 }
 
+// Rows are rebuilt only when their data changed, so inputs being edited are kept.
+const rowCache = new Map(); // SA -> {sig, tr, detail}
+
+function buildRow(d){
+  const tr=document.createElement("tr");
+  tr.className="device-main";
+  tr.innerHTML=`
+    <td><input class="deviceSelect" data-sa="${d.sa}" type="checkbox"
+        ${selectedSAs.has(d.sa) ? "checked" : ""}
+        onchange="toggleSelected(${d.sa},this.checked)"></td>
+    <td><b>SA${d.sa}</b><button class="edit-btn" title="Edit label" onclick="editLabel(${d.sa})">✎</button>
+      <div class="lbl" title="${escapeHtml(d.label||"")}">${escapeHtml(d.label||"")}</div></td>
+    <td>${statusText(d)}<div class="flags">${statusFlags(d.status)}</div></td>
+    <td>${val(d.level)}</td>
+    <td>${val(d.type)}</td>
+    <td>${val(d.version)}</td>
+    <td>${d.groups}</td>
+    <td style="white-space:nowrap">
+      <button class="op" onclick="inspectDeviceUI(${d.sa})">Inspect <span class="help" data-tip="Loads extended information for this device: configured levels, flags, device information, groups and scenes.">?</span></button>
+      <button class="op" onclick="deviceAction(${d.sa},'identify')">Identify <span class="help" data-tip="Flashes this addressed luminaire three times so you can match its physical location to its short address.">?</span></button>
+      <button class="op" onclick="deviceAction(${d.sa},'off')">Off</button>
+      <button class="op" onclick="deviceAction(${d.sa},'on')">On</button>
+      ${tcControl(d)}
+      <button id="expandBtn${d.sa}" class="expand-btn" onclick="toggleDeviceCard(${d.sa})">${expandedSAs.has(d.sa)?"▴":"▾"}</button>
+    </td>`;
+
+  const detail=document.createElement("tr");
+  detail.className="device-detail";
+  const td=document.createElement("td");
+  td.colSpan=8;
+  td.innerHTML=detailCard(d);
+  detail.appendChild(td);
+  return {tr, detail};
+}
+
 function renderDevices(ds){
   const tb=document.getElementById("devices");
-  tb.innerHTML="";
+  const seen=new Set();
+  let prev=null;
 
   for(const d of ds){
     if(!d.present) continue;
+    seen.add(d.sa);
 
     if(d.inspected && autoExpandAfterInspect.has(d.sa)){
       expandedSAs.add(d.sa);
       autoExpandAfterInspect.delete(d.sa);
     }
 
-    const tr=document.createElement("tr");
-    tr.className="device-main";
-    tr.innerHTML=`
-      <td><input class="deviceSelect" data-sa="${d.sa}" type="checkbox"
-          ${selectedSAs.has(d.sa) ? "checked" : ""}
-          onchange="toggleSelected(${d.sa},this.checked)"></td>
-      <td><b>SA${d.sa}</b></td>
-      <td>${statusText(d)}</td>
-      <td>${val(d.level)}</td>
-      <td>${val(d.type)}</td>
-      <td>${val(d.version)}</td>
-      <td>${d.groups}</td>
-      <td style="white-space:nowrap">
-        <button class="op" onclick="inspectDeviceUI(${d.sa})">Inspect <span class="help" data-tip="Loads extended information for this device: configured levels, flags, device information, groups and scenes.">?</span></button>
-        <button onclick="deviceAction(${d.sa},'identify')">Identify <span class="help" data-tip="Flashes this addressed luminaire three times so you can match its physical location to its short address.">?</span></button>
-        <button onclick="deviceAction(${d.sa},'off')">Off</button>
-        <button onclick="deviceAction(${d.sa},'on')">On</button>
-        ${tcControl(d)}
-        <button id="expandBtn${d.sa}" class="expand-btn" onclick="toggleDeviceCard(${d.sa})">${expandedSAs.has(d.sa)?"▴":"▾"}</button>
-      </td>`;
-    tb.appendChild(tr);
+    const sig=JSON.stringify(d);
+    let c=rowCache.get(d.sa);
+    const editing = c && c.detail.contains(document.activeElement) && document.activeElement.tagName!=="BUTTON";
+    if(!c || (c.sig!==sig && !editing)){
+      const rows=buildRow(d);
+      if(c){ c.tr.replaceWith(rows.tr); c.detail.replaceWith(rows.detail); }
+      c={sig, tr:rows.tr, detail:rows.detail};
+      rowCache.set(d.sa, c);
+    }
 
-    const detail=document.createElement("tr");
-    detail.className="device-detail";
-    const td=document.createElement("td");
-    td.colSpan=8;
-    td.innerHTML=detailCard(d);
-    detail.appendChild(td);
-    tb.appendChild(detail);
+    const anchor = prev ? prev.detail.nextSibling : tb.firstChild;
+    if(c.tr!==anchor) tb.insertBefore(c.tr, anchor);
+    if(c.tr.nextSibling!==c.detail) tb.insertBefore(c.detail, c.tr.nextSibling);
+    prev=c;
   }
 
+  for(const [sa,c] of rowCache){
+    if(!seen.has(sa)){ c.tr.remove(); c.detail.remove(); rowCache.delete(sa); }
+  }
   updateSelectedCount();
+}
+
+function escapeHtml(t){
+  return String(t).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+}
+
+async function editLabel(sa){
+  const cur = (lastDevices.find(d=>d.sa===sa)||{}).label || "";
+  const text = prompt("Label for SA"+sa+" (max 40 characters, empty to remove):", cur);
+  if(text===null) return;
+  try{
+    await api("/api/label?sa="+sa+"&text="+encodeURIComponent(text), {method:"POST"});
+    refresh();
+  }catch(e){ alert(e.message); }
+}
+
+function readMemory(sa, bank){
+  start("/api/device?sa="+sa+"&cmd=memory&bank="+bank);
+}
+
+function resetDevice(sa){
+  if(!confirm("RESET SA"+sa+"? Levels, fade, groups and scenes return to factory values. The short address is kept.")) return;
+  deviceAction(sa,'reset');
+}
+
+function saveConfig(sa){
+  const g=id=>encodeURIComponent(document.getElementById(id+sa).value.trim());
+  start(`/api/device?sa=${sa}&cmd=config&min=${g("cfgMin")}&max=${g("cfgMax")}&pon=${g("cfgPon")}&sf=${g("cfgSf")}&ft=${g("cfgFt")}&fr=${g("cfgFr")}`);
+}
+
+function saveGroups(sa){
+  let mask=0;
+  for(let g=0; g<16; g++) if(document.getElementById(`grp${sa}_${g}`).checked) mask |= (1<<g);
+  start(`/api/device?sa=${sa}&cmd=groups&mask=${mask}`);
+}
+
+function saveScenes(sa){
+  let q="", n=0;
+  for(let i=0; i<16; i++){
+    const el=document.getElementById(`scn${sa}_${i}`);
+    const v=el.value.trim().toLowerCase();
+    const now = (v==="" || v==="mask") ? "mask" : v;
+    if(now===el.dataset.orig) continue;
+    q+=`&s${i}=${encodeURIComponent(now)}`;
+    n++;
+  }
+  if(!n) return alert("No scene changes.");
+  start(`/api/device?sa=${sa}&cmd=scenes${q}`);
+}
+
+function sceneRecall(sa, n){
+  start(`/api/target?adr=${sa}&action=scene&value=${n}`);
+}
+
+// ---------- Group / broadcast control ----------
+(function initTargets(){
+  const t=document.getElementById("tgtAdr");
+  t.innerHTML = `<option value="127">Broadcast</option>` +
+    Array.from({length:16},(_,g)=>`<option value="${64+g}">Group ${g}</option>`).join("");
+  document.getElementById("tgtScene").innerHTML =
+    Array.from({length:16},(_,n)=>`<option value="${n}">${n}</option>`).join("");
+})();
+
+function targetAction(action){
+  const adr=document.getElementById("tgtAdr").value;
+  let value=0;
+  if(action==="level") value=Number(document.getElementById("tgtLevel").value);
+  if(action==="scene") value=Number(document.getElementById("tgtScene").value);
+  start(`/api/target?adr=${adr}&action=${action}&value=${value}`);
+}
+
+// ---------- Scan statistics / auto-scan ----------
+function scanRounds(){
+  const n=Number(document.getElementById("scanRounds").value);
+  if(!(n>=1 && n<=100)) return alert("Rounds must be 1..100.");
+  start("/api/scan-rounds?rounds="+n);
+}
+
+let autoScanEdited=false;
+document.getElementById("autoScan").addEventListener("input", ()=>{ autoScanEdited=true; });
+
+async function setAutoScan(){
+  const m=Number(document.getElementById("autoScan").value);
+  if(!(m>=0 && m<=1440)) return alert("Interval must be 0..1440 minutes.");
+  try{ await api("/api/autoscan?minutes="+m,{method:"POST"}); autoScanEdited=false; refresh(); }
+  catch(e){ alert(e.message); }
+}
+
+async function resetStats(){
+  try{ await api("/api/stats/reset",{method:"POST"}); refresh(); }
+  catch(e){ alert(e.message); }
+}
+
+function renderStats(s){
+  document.getElementById("statRounds").textContent=s.statRounds;
+  const rows=(s.stats||[]).map(st=>{
+    const missed=s.statRounds-st.ok-st.invalid-st.collision;
+    return `<tr><td>SA${st.sa}</td><td>${escapeHtml(st.label||"")}</td><td>${st.ok}</td>
+      <td class="${st.invalid?"warn":""}">${st.invalid}</td><td class="${st.collision?"warn":""}">${st.collision}</td>
+      <td class="${missed>0?"bad":"ok"}">${missed}</td></tr>`;
+  }).join("");
+  const body=document.getElementById("statsBody");
+  const html = rows || `<tr><td colspan="6" class="muted">No address has answered yet.</td></tr>`;
+  if(body.innerHTML!==html) body.innerHTML=html;
+}
+
+// ---------- Raw command & waveform ----------
+const RAW_PRESETS = [
+  ["FF91", true,  "Broadcast QUERY CONTROL GEAR PRESENT"],
+  ["FF96", true,  "Broadcast QUERY MISSING SHORT ADDRESS"],
+  ["0190", true,  "QUERY STATUS SA0"],
+  ["01A0", true,  "QUERY ACTUAL LEVEL SA0"],
+  ["FF00", false, "Broadcast OFF"],
+  ["FF05", false, "Broadcast RECALL MAX LEVEL"],
+  ["FE80", false, "Broadcast level 128"],
+];
+(function initPresets(){
+  document.getElementById("rawPreset").innerHTML = `<option value="">Presets…</option>` +
+    RAW_PRESETS.map((p,i)=>`<option value="${i}">${p[0]} · ${p[2]}</option>`).join("");
+})();
+
+function applyPreset(){
+  const sel=document.getElementById("rawPreset");
+  const p=RAW_PRESETS[Number(sel.value)];
+  if(!p) return;
+  document.getElementById("rawFrame").value=p[0];
+  document.getElementById("rawReply").checked=p[1];
+  sel.value="";
+}
+
+function sendRaw(){
+  const frame=document.getElementById("rawFrame").value.replace(/\s+/g,"");
+  if(!/^([0-9a-fA-F]{4}|[0-9a-fA-F]{6})$/.test(frame)) return alert("Frame must be 4 or 6 hex digits.");
+  const reply=document.getElementById("rawReply").checked ? 1 : 0;
+  const repeat=Number(document.getElementById("rawRepeat").value)||1;
+  const capture=document.getElementById("rawCapture").checked ? document.getElementById("rawSamples").value : 0;
+  start(`/api/raw?frame=${frame}&reply=${reply}&repeat=${repeat}&capture=${capture}`);
+}
+
+let scope=null, scopeSeqSeen=0;
+
+async function loadScope(){
+  scope=await api("/api/scope");
+  const bits=[];
+  for(let i=0;i<scope.samples;i++){
+    const byte=parseInt(scope.data.substr((i>>3)*2,2),16);
+    bits.push((byte>>(7-(i&7)))&1);
+  }
+  scope.bits=bits;
+  const ms=scope.samples*1000/scope.rate;
+  const off=document.getElementById("scopeOffset");
+  off.max=Math.max(0,Math.floor(ms));
+  off.value = scope.txStart<0xFFFF ? Math.max(0,Math.floor(scope.txStart*1000/scope.rate)-2) : 0;
+
+  // low samples outside our own transmission = activity of other bus participants
+  let lowOutside=0;
+  bits.forEach((b,i)=>{ if(!b && !(scope.txStart<0xFFFF && i>=scope.txStart && i<=(scope.txEnd<0xFFFF?scope.txEnd:scope.samples))) lowOutside++; });
+  const txMs = scope.txStart<0xFFFF ? (scope.txStart*1000/scope.rate).toFixed(1)+" ms" : "—";
+  document.getElementById("scopeInfo").innerHTML =
+    `<b>${escapeHtml(scope.title)}</b> · ${scope.samples} samples (${ms.toFixed(0)} ms) · TX starts at ${txMs} · ` +
+    (lowOutside ? `<span class="ok">bus activity outside TX: ${lowOutside} low samples (${(lowOutside*1000/scope.rate).toFixed(1)} ms)</span>`
+                : `<span class="bad">no bus activity outside our transmission</span>`);
+  drawScope();
+}
+
+function drawScope(){
+  const c=document.getElementById("scope");
+  const dpr=window.devicePixelRatio||1;
+  c.width=c.clientWidth*dpr; c.height=c.clientHeight*dpr;
+  const g=c.getContext("2d");
+  g.scale(dpr,dpr);
+  const W=c.clientWidth, H=c.clientHeight;
+  g.clearRect(0,0,W,H);
+  if(!scope || !scope.bits) return;
+
+  const rate=scope.rate;
+  const totalMs=scope.samples*1000/rate;
+  let winMs=Number(document.getElementById("scopeWindow").value) || totalMs;
+  const startMs=Math.min(Number(document.getElementById("scopeOffset").value), Math.max(0,totalMs-1));
+  const s0=Math.floor(startMs*rate/1000);
+  const s1=Math.min(scope.samples, Math.ceil((startMs+winMs)*rate/1000));
+  const x=i=>(i-s0)/((winMs*rate/1000))*W;
+  const yHigh=34, yLow=H-26;
+
+  // our transmission
+  if(scope.txStart<0xFFFF){
+    const a=x(scope.txStart), b=x(scope.txEnd<0xFFFF?scope.txEnd:scope.samples);
+    g.fillStyle="rgba(87,157,255,.13)";
+    g.fillRect(Math.max(0,a),0,Math.min(W,b)-Math.max(0,a),H);
+  }
+
+  // grid
+  g.strokeStyle="#222a35"; g.fillStyle="#7d8796"; g.font="10px ui-monospace,Menlo,monospace"; g.lineWidth=1;
+  const step = winMs<=30 ? 1 : winMs<=120 ? 5 : 20;
+  for(let t=Math.ceil(startMs/step)*step; t<=startMs+winMs; t+=step){
+    const px=(t-startMs)/winMs*W;
+    g.beginPath(); g.moveTo(px,0); g.lineTo(px,H); g.stroke();
+    g.fillText(t+" ms", px+3, 12);
+  }
+  g.fillText("high (idle)", 4, yHigh-6);
+  g.fillText("low (asserted)", 4, yLow+14);
+
+  // waveform
+  g.strokeStyle="#57c785"; g.lineWidth=1.5; g.beginPath();
+  for(let i=s0;i<s1;i++){
+    const y=scope.bits[i]?yHigh:yLow;
+    if(i===s0) g.moveTo(x(i),y);
+    else if(scope.bits[i]!==scope.bits[i-1]) g.lineTo(x(i),scope.bits[i-1]?yHigh:yLow), g.lineTo(x(i),y);
+  }
+  g.lineTo(x(s1),scope.bits[s1-1]?yHigh:yLow);
+  g.stroke();
+}
+window.addEventListener("resize", drawScope);
+
+// ---------- Bus monitor ----------
+const SPECIAL = {0xA1:"TERMINATE",0xA3:"DTR0",0xA5:"INITIALISE",0xA7:"RANDOMISE",0xA9:"COMPARE",0xAB:"WITHDRAW",0xAD:"PING",
+  0xB1:"SEARCHADDRH",0xB3:"SEARCHADDRM",0xB5:"SEARCHADDRL",0xB7:"PROGRAM SHORT ADDRESS",0xB9:"VERIFY SHORT ADDRESS",
+  0xBB:"QUERY SHORT ADDRESS",0xC1:"ENABLE DEVICE TYPE",0xC3:"DTR1",0xC5:"DTR2",0xC7:"WRITE MEMORY LOCATION",0xC9:"WRITE MEMORY LOCATION - NO REPLY"};
+const CMDS = {0:"OFF",1:"UP",2:"DOWN",3:"STEP UP",4:"STEP DOWN",5:"RECALL MAX LEVEL",6:"RECALL MIN LEVEL",7:"STEP DOWN AND OFF",
+  8:"ON AND STEP UP",9:"ENABLE DAPC SEQUENCE",10:"GO TO LAST ACTIVE LEVEL",32:"RESET",33:"STORE ACTUAL LEVEL IN DTR0",
+  34:"SAVE PERSISTENT VARIABLES",35:"SET OPERATING MODE",36:"RESET MEMORY BANK",37:"IDENTIFY DEVICE",42:"SET MAX LEVEL",
+  43:"SET MIN LEVEL",44:"SET SYSTEM FAILURE LEVEL",45:"SET POWER ON LEVEL",46:"SET FADE TIME",47:"SET FADE RATE",
+  48:"SET EXTENDED FADE TIME",128:"SET SHORT ADDRESS",129:"ENABLE WRITE MEMORY",144:"QUERY STATUS",
+  145:"QUERY CONTROL GEAR PRESENT",146:"QUERY LAMP FAILURE",147:"QUERY LAMP POWER ON",148:"QUERY LIMIT ERROR",
+  149:"QUERY RESET STATE",150:"QUERY MISSING SHORT ADDRESS",151:"QUERY VERSION NUMBER",152:"QUERY CONTENT DTR0",
+  153:"QUERY DEVICE TYPE",154:"QUERY PHYSICAL MINIMUM",155:"QUERY POWER FAILURE",156:"QUERY CONTENT DTR1",
+  157:"QUERY CONTENT DTR2",158:"QUERY OPERATING MODE",159:"QUERY LIGHT SOURCE TYPE",160:"QUERY ACTUAL LEVEL",
+  161:"QUERY MAX LEVEL",162:"QUERY MIN LEVEL",163:"QUERY POWER ON LEVEL",164:"QUERY SYSTEM FAILURE LEVEL",
+  165:"QUERY FADE TIME/FADE RATE",166:"QUERY MANUFACTURER SPECIFIC MODE",167:"QUERY NEXT DEVICE TYPE",
+  168:"QUERY EXTENDED FADE TIME",169:"QUERY CONTROL GEAR FAILURE",192:"QUERY GROUPS 0-7",193:"QUERY GROUPS 8-15",
+  194:"QUERY RANDOM ADDRESS H",195:"QUERY RANDOM ADDRESS M",196:"QUERY RANDOM ADDRESS L",197:"READ MEMORY LOCATION",
+  226:"DT8 ACTIVATE",231:"DT8 SET TEMPORARY Tc",249:"DT8 QUERY COLOUR TYPE FEATURES",250:"DT8 QUERY COLOUR VALUE"};
+
+function cmdName(c){
+  if(CMDS[c]) return CMDS[c];
+  if(c>=16 && c<=31) return "GO TO SCENE "+(c-16);
+  if(c>=64 && c<=79) return "SET SCENE "+(c-64);
+  if(c>=80 && c<=95) return "REMOVE FROM SCENE "+(c-80);
+  if(c>=96 && c<=111) return "ADD TO GROUP "+(c-96);
+  if(c>=112 && c<=127) return "REMOVE FROM GROUP "+(c-112);
+  if(c>=176 && c<=191) return "QUERY SCENE "+(c-176)+" LEVEL";
+  if(c>=224) return "APPLICATION EXTENDED "+c;
+  return "COMMAND "+c;
+}
+
+function decodeForward(b0,b1){
+  if(SPECIAL[b0]!==undefined) return `${SPECIAL[b0]} ${b1} (0x${hex2(b1)})`;
+  let target;
+  if(b0<0x80) target="SA"+(b0>>1);
+  else if((b0&0xE0)===0x80) target="G"+((b0>>1)&15);
+  else if(b0>=0xFE) target="BROADCAST";
+  else if(b0===0xFC || b0===0xFD) target="BROADCAST UNADDRESSED";
+  else return "special/reserved";
+  return (b0&1) ? `${target}: ${cmdName(b1)}` : `${target}: level ${b1}`;
+}
+
+function hex2(v){ return Number(v).toString(16).padStart(2,"0").toUpperCase(); }
+
+function traceMeaning(e){
+  const bytes=(e.d.match(/../g)||[]).map(h=>parseInt(h,16));
+  if(e.k===1){
+    if(e.rv>=0) return `reply 0x${hex2(e.rv)} (${e.rv})${e.rv===255?" = YES":""}`;
+    if(e.rv===-3) return "collision (several gears answered or noise)";
+    return `invalid reply, ${e.b} bit(s)`;
+  }
+  if(e.k===3) return "undecodable bus activity";
+  if(e.b===16) return decodeForward(bytes[0],bytes[1]);
+  if(e.b===24) return "24-bit frame (input devices / DALI-2 part 103)";
+  if(e.b===8) return `backward frame 0x${hex2(bytes[0])} (late or stray reply)`;
+  return `${e.b}-bit frame`;
+}
+
+const KIND = {0:["TX","k-tx"],1:["REPLY","k-reply"],2:["BUS","k-foreign"],3:["BUS ERR","k-err"]};
+let monEntries=[], monSeq=0;
+
+let tracePolling=false;
+
+async function pollTrace(){
+  if(tracePolling || document.getElementById("monPause").checked) return;
+  tracePolling=true;
+  try{
+    const r=await api("/api/trace?since="+monSeq);
+    if(r.entries.length){
+      monEntries=monEntries.concat(r.entries).slice(-300);
+      renderMonitor();
+    }
+    monSeq=r.seq;
+  } finally { tracePolling=false; }
+}
+
+function renderMonitor(){
+  const onlyForeign=document.getElementById("monForeign").checked;
+  const wrap=document.getElementById("monWrap");
+  const atBottom = wrap.scrollTop+wrap.clientHeight >= wrap.scrollHeight-20;
+  let prevT=null, html="";
+  for(const e of monEntries){
+    const delta = prevT===null ? "" : (e.t-prevT).toFixed(1);
+    prevT=e.t;
+    if(onlyForeign && e.k<2) continue;
+    const [kind,cls]=KIND[e.k]||["?",""];
+    const frame = e.k===1 ? (e.rv>=0 ? hex2(e.rv) : "—") : (e.d || "—");
+    html+=`<tr><td>${e.s}</td><td>${e.t.toFixed(1)}</td><td>${delta}</td><td class="${cls}">${kind}</td>
+      <td class="mono">${frame}</td><td>${escapeHtml(traceMeaning(e))}</td></tr>`;
+  }
+  document.getElementById("monBody").innerHTML = html || `<tr><td colspan="6" class="muted">No frames yet.</td></tr>`;
+  if(atBottom) wrap.scrollTop=wrap.scrollHeight;
+}
+
+function clearMonitor(){
+  monEntries=[];
+  renderMonitor();
+}
+
+// ---------- Memory bank ----------
+let memSeqSeen=0;
+
+function verText(v){ return v>=0 ? `${v>>2}.${v&3}` : "—"; }
+
+function decodeBank0(b){
+  const ok=i=>b[i]!==undefined && b[i]>=0;
+  const range=(a,z)=>{ for(let i=a;i<=z;i++) if(!ok(i)) return null; return b.slice(a,z+1); };
+  const rows=[];
+  const gtin=range(3,8);
+  if(gtin) rows.push(["GTIN", gtin.reduce((acc,v)=>acc*256n+BigInt(v),0n).toString()]);
+  if(ok(9)&&ok(10)) rows.push(["Firmware version", `${b[9]}.${b[10]}`]);
+  const serial=range(0x0B,0x12);
+  if(serial) rows.push(["Identification number", serial.map(hex2).join("")]);
+  if(ok(0x13)&&ok(0x14)) rows.push(["Hardware version", `${b[0x13]}.${b[0x14]}`]);
+  if(ok(0x15)) rows.push(["IEC 62386-101 version", verText(b[0x15])]);
+  if(ok(0x16)) rows.push(["IEC 62386-102 version", verText(b[0x16])]);
+  if(ok(0x17)) rows.push(["IEC 62386-103 version", verText(b[0x17])]);
+  if(ok(0x19)) rows.push(["Logical control gear units", b[0x19]]);
+  if(ok(2)) rows.push(["Last accessible memory bank", b[2]]);
+  return rows;
+}
+
+async function loadMemory(){
+  const m=await api("/api/memory");
+  const card=document.getElementById("memCard");
+  card.style.display="block";
+  document.getElementById("memTitle").textContent=`Memory bank ${m.bank} · SA${m.sa}`;
+  if(!m.bytes.length){
+    document.getElementById("memDecoded").innerHTML=`<span class="bad">Bank not readable: the gear did not answer or does not implement it.</span>`;
+    document.getElementById("memDump").textContent="";
+    return;
+  }
+  let dump="     " + Array.from({length:16},(_,i)=>" "+hex2(i)).join("") + "\n";
+  for(let r=0;r<m.bytes.length;r+=16){
+    dump+=hex2(r)+":  "+m.bytes.slice(r,r+16).map(v=>v<0?" --":" "+hex2(v)).join("")+"\n";
+  }
+  document.getElementById("memDump").textContent=dump;
+  if(m.bank===0){
+    const rows=decodeBank0(m.bytes);
+    document.getElementById("memDecoded").innerHTML = `<div class="device-grid">` +
+      rows.map(r=>`<div class="device-field"><span class="k">${r[0]}</span><span class="v">${escapeHtml(String(r[1]))}</span></div>`).join("") +
+      `</div><div class="small muted" style="margin-top:8px">Decoded with the DALI-2 layout (IEC 62386-102 ed2). DALI-1 gear may use a different layout, check the raw dump.</div>`;
+  } else {
+    document.getElementById("memDecoded").innerHTML=`<div class="small muted">Byte 0 = last accessible location. Layout depends on the bank and manufacturer; D4i banks 202–207 hold energy and diagnostics data.</div>`;
+  }
+  card.scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
 async function refresh(){
@@ -528,7 +1115,16 @@ async function refresh(){
     document.getElementById("opText").textContent=s.operation+" · "+s.progress+"%";
     document.getElementById("progressBar").style.width=s.progress+"%";
     document.getElementById("lastResult").textContent=s.lastResult||"";
+    lastDevices=s.devices;
     if(!tcDragging) renderDevices(s.devices);
+    renderStats(s);
+    document.getElementById("scanDiff").textContent=s.scanDiff||"—";
+    document.getElementById("autoScanState").textContent = s.autoScan ? `active, every ${s.autoScan} min` : "off";
+    if(!autoScanEdited && document.activeElement!==document.getElementById("autoScan"))
+      document.getElementById("autoScan").value=s.autoScan;
+    if(s.traceSeq!==monSeq) pollTrace().catch(()=>{});
+    if(s.scopeSeq && s.scopeSeq!==scopeSeqSeen){ scopeSeqSeen=s.scopeSeq; loadScope().catch(()=>{}); }
+    if(s.memSeq && s.memSeq!==memSeqSeen){ memSeqSeen=s.memSeq; loadMemory().catch(()=>{}); }
 
     if(s.log!==lastLog){
       const el=document.getElementById("log");

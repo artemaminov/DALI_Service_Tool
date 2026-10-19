@@ -51,6 +51,10 @@ Changelog:
 
 #define DALI_RX_BUF_SIZE 40
 
+//bus trace event kinds passed to Dali::trace_cb
+#define DALI_TRACE_TX 0     //forward frame sent by us
+#define DALI_TRACE_REPLY 1  //result of waiting for a backward frame: rv = reply byte or negative DALI_RESULT_xxx
+
 class Dali {
 public:
   //-------------------------------------------------
@@ -68,6 +72,16 @@ public:
   volatile uint32_t diag_tx_samples = 0;     //samples taken while transmitting
   volatile uint32_t diag_tx_low_samples = 0; //of those, samples where RX saw the bus low (echo of own frame)
   volatile uint32_t diag_rx_starts = 0;      //receptions started by a low bus while idle
+
+  //waveform capture of the RX pin, 1 bit per timer sample (1 = bus high), MSB first
+  void capture_start(uint8_t* buf, uint16_t samples);
+  volatile uint8_t cap_active = 0;
+  volatile uint16_t cap_pos = 0;
+  volatile uint16_t cap_tx_start = 0xFFFF; //sample index where our transmission started (0xFFFF = none)
+  volatile uint16_t cap_tx_end = 0xFFFF;   //sample index where our transmission ended (0xFFFF = none)
+
+  //bus trace hook, called from task context (never from the ISR)
+  void (*trace_cb)(uint8_t kind, const uint8_t* data, uint8_t bits, int16_t rv) = nullptr;
   
   //-------------------------------------------------
   //HIGH LEVEL PUBLIC
@@ -80,6 +94,8 @@ public:
   uint8_t  set_power_on_level(uint8_t v, uint8_t adr=0xFF); //returns 0 on success 
   uint8_t  tx_wait(uint8_t* data, uint8_t bitlen, uint32_t timeout_ms=500); //blocking transmit bytes
   int16_t  tx_wait_rx(uint8_t cmd0, uint8_t cmd1, uint32_t timeout_ms=500); //blocking transmit and receive
+  int16_t  tx_wait_rx_frame(uint8_t* data, uint8_t bitlen, uint32_t timeout_ms=500); //blocking transmit of a 16/24 bit frame and receive
+  uint8_t  read_memory(uint8_t bank, uint8_t offset, int16_t* out, uint8_t count, uint8_t adr); //returns 0 on success, out[i] = byte or negative DALI_RESULT_xxx
 
   uint8_t read_memory_bank(uint8_t bank, uint8_t adr);
   uint8_t set_dtr0(uint8_t value, uint8_t adr);
@@ -127,6 +143,10 @@ private:
   volatile uint8_t txspcnt;        //sample count since last transmitted bit
   volatile uint8_t txhigh;         //currently bus is high
   volatile uint8_t txcollision;    //collision count (capped at 255)  
+
+  //WAVEFORM CAPTURE
+  volatile uint8_t* cap_buf = nullptr;
+  uint16_t cap_len = 0;
 
   //hardware abstraction layer
   uint8_t (*bus_is_high)(); //returns !=0 if DALI bus is in high (non-asserted) state
@@ -433,6 +453,7 @@ private:
 //DT8 (IEC62386-209) application extended commands: each must directly follow ENABLE DEVICE TYPE 8
 #define DALI_DT8_ACTIVATE 226 //226 DT8 - Applies the temporary colour settings.
 #define DALI_DT8_SET_TEMPORARY_COLOUR_TEMPERATURE 231 //231 DT8 - Stores DTR1:DTR0 (mirek) as temporary colour temperature Tc.
+#define DALI_DT8_QUERY_COLOUR_TYPE_FEATURES 249 //249 DT8 - Returns colour type features: bit0 xy, bit1 Tc, bits2-4 primaries, bits5-7 RGBWAF channels.
 #define DALI_DT8_QUERY_COLOUR_VALUE 250 //250 DT8 - Returns MSB of the value selected by DTR0, LSB is placed in DTR0.
 //QUERY COLOUR VALUE selectors (DTR0)
 #define DALI_DT8_SELECTOR_TC 2           //current colour temperature Tc
