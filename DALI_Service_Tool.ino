@@ -141,7 +141,8 @@ enum OpType {
   OP_SELECTED_OFF,
   OP_BROADCAST_ON,
   OP_BROADCAST_OFF,
-  OP_SET_TC
+  OP_SET_TC,
+  OP_BROADCAST_TC
 };
 
 struct PendingOp {
@@ -790,6 +791,19 @@ void setDeviceTc(int sa, uint16_t mirek) {
   finishOperation("SA" + String(sa) + " colour temperature " + String(1000000UL / mirek) + " K");
 }
 
+void setBroadcastTc(uint16_t mirek) {
+  setOperation("Broadcast colour temperature");
+
+  // 0x7F is the DALI broadcast address for regular (and DT8) commands.
+  dali.set_colour_temperature(mirek, 0x7F);
+  for (int sa = 0; sa < 64; sa++) {
+    if (devices[sa].present) devices[sa].tc = mirek;
+  }
+  addLog("BROADCAST Tc -> " + String(mirek) + " mirek (" + String(1000000UL / mirek) + " K)");
+
+  finishOperation("Broadcast colour temperature " + String(1000000UL / mirek) + " K sent");
+}
+
 void setSelectedLevel(uint64_t mask, uint8_t level) {
   setOperation(level ? "Selected ON" : "Selected OFF");
 
@@ -946,6 +960,7 @@ void operationTask(void* parameter) {
     case OP_BROADCAST_ON:      setBroadcastLevel(200); break;
     case OP_BROADCAST_OFF:     setBroadcastLevel(0); break;
     case OP_SET_TC:            setDeviceTc(op.sa, (uint16_t)op.value); break;
+    case OP_BROADCAST_TC:      setBroadcastTc((uint16_t)op.value); break;
     default:
       finishOperation("No operation");
       break;
@@ -1213,6 +1228,12 @@ void setupHttp() {
     String cmd = server.arg("cmd");
     if (cmd == "on") sendBusyOrStarted(startOperation(OP_BROADCAST_ON));
     else if (cmd == "off") sendBusyOrStarted(startOperation(OP_BROADCAST_OFF));
+    else if (cmd == "tc") {
+      // Colour temperature in mirek: 100..1000 mirek = 10000..1000 K
+      int mirek = server.hasArg("mirek") ? server.arg("mirek").toInt() : 0;
+      if (mirek < 100 || mirek > 1000) return server.send(400, "text/plain", "mirek must be 100..1000");
+      sendBusyOrStarted(startOperation(OP_BROADCAST_TC, -1, 0, mirek));
+    }
     else server.send(400, "text/plain", "Unknown cmd");
   });
 

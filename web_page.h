@@ -135,6 +135,14 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px
         <span style="width:12px"></span>
         <button class="primary op" onclick="broadcastAction('on')">BROADCAST ON <span class="help" data-tip="Broadcast is one DALI command addressed to all control gear on the bus. It does not require or use individual short addresses.">?</span></button>
         <button class="op" onclick="broadcastAction('off')">BROADCAST OFF</button>
+        <span class="tc">
+          <input id="tcBroadcast" class="op" type="range" min="154" max="370" value="262"
+            aria-label="Broadcast colour temperature"
+            oninput="tcBroadcastInput(this)"
+            onchange="tcBroadcastCommit(this)">
+          <span class="tc-k" id="tcBroadcastLabel">3820 K</span>
+          <span class="help" data-tip="Broadcast colour temperature (DALI DT8) to all gear at once, cold on the left, warm on the right (6500–2700 K). Gear without DT8 ignores the command.">?</span>
+        </span>
       </div>
 
       <div class="small muted" style="margin-top:8px">
@@ -447,6 +455,17 @@ function tcCommit(sa, el){
   const mirek = Number(el.value);
   tcValues.set(sa, mirek);
   start("/api/device?sa="+sa+"&cmd=tc&mirek="+mirek);
+}
+
+function tcBroadcastInput(el){
+  document.getElementById("tcBroadcastLabel").textContent = kelvin(Number(el.value)) + " K";
+}
+
+function tcBroadcastCommit(el){
+  const mirek = Number(el.value);
+  // Every gear receives the same value, keep the per-device sliders in sync
+  document.querySelectorAll("input.deviceSelect").forEach(cb => tcValues.set(Number(cb.dataset.sa), mirek));
+  start("/api/broadcast?cmd=tc&mirek="+mirek);
 }
 
 function tcText(v){
