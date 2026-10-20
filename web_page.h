@@ -17,7 +17,7 @@ main{max-width:1180px;margin:auto;padding:22px}.top{display:flex;justify-content
 h1{margin:0 0 5px;font-size:28px}h2{margin:0 0 14px;font-size:18px}.sub,.muted{color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
 .full{grid-column:1/-1}.actions{display:flex;gap:9px;flex-wrap:wrap}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-button{border:1px solid #3b4552;background:#232a34;color:var(--txt);padding:9px 12px;border-radius:9px;cursor:pointer;font-weight:600}
+button{border:1px solid #3b4552;background:#232a34;color:var(--txt);padding:9px 12px;border-radius:9px;cursor:pointer;font-weight:600;text-transform:uppercase;letter-spacing:.02em}
 button:hover{border-color:var(--blue)}button.primary{background:#214d85;border-color:#3f7dca}.danger{background:#522626;border-color:#8b4141}.danger:hover{border-color:var(--red)}
 button:disabled{opacity:.45;cursor:not-allowed}input,select{background:#101319;color:var(--txt);border:1px solid #37404c;border-radius:8px;padding:9px}
 .badge{display:inline-block;padding:5px 9px;border-radius:999px;background:#222a34;border:1px solid #35404d;font-size:13px}.ok{color:var(--green)}.bad{color:var(--red)}
@@ -85,7 +85,11 @@ canvas{width:100%;height:150px;background:#0b0d10;border:1px solid #262c34;borde
       <div class="sub">ESP32-C6 Pico + Waveshare Pico-DALI2 · GPIO14 TX / GPIO5 RX</div>
     </div>
     <div class="row">
-      <span class="badge" id="busyBadge">Idle</span>
+      <select id="langSel" aria-label="Language" onchange="setLang(this.value)">
+        <option value="en">English</option>
+        <option value="ru">Русский</option>
+      </select>
+      <span class="badge" id="busyBadge">IDLE</span>
       <span class="badge">Found: <b id="foundCount">0</b></span>
     </div>
   </div>
@@ -312,6 +316,265 @@ canvas{width:100%;height:150px;background:#0b0d10;border:1px solid #262c34;borde
 <div id="tooltip" class="tooltip"></div>
 
 <script>
+// ---------- Language ----------
+// English is the source language. Text nodes and attributes are translated in place by
+// looking up their English text, so the HTML templates below stay in English.
+// Strings with inserted values go through tr() with {placeholders}.
+const RU = {
+  // header, common
+  "Found:":"Найдено:", "BUSY":"ЗАНЯТ", "IDLE":"ГОТОВ", "Connection error:":"Ошибка связи:",
+  "Yes":"Да", "No":"Нет", "off":"выкл", "0 · off":"0 · выкл", "ms":"мс", "min":"мин",
+
+  // scanning
+  "Scanning":"Сканирование", "SCAN":"Сканировать", "DETAILED SCAN":"Подробный скан", "Download report":"Скачать отчёт",
+  "Scan uses QUERY STATUS on SA0…SA63. Detailed Scan also reads level, device type, version and group membership.":
+    "Сканирование отправляет QUERY STATUS на адреса SA0…SA63. Подробный скан дополнительно читает уровень, тип устройства, версию и группы.",
+  "Compared with previous scan:":"По сравнению с прошлым сканом:", "first scan":"первый скан", "no changes":"без изменений",
+  "Repeat":"Повторить", "rounds":"раз", "Auto-scan every":"Автоскан каждые", "Set":"Задать",
+  "active, every":"включено, каждые",
+  "Scan queries short addresses SA0…SA63 to find DALI control gear that currently responds.":
+    "Опрашивает короткие адреса SA0…SA63 и находит отвечающие устройства DALI.",
+  "Queries each responding short address for additional data: actual level, device type, version and group membership.":
+    "Для каждого ответившего адреса читает дополнительные данные: текущий уровень, тип устройства, версию и группы.",
+  "Runs the normal scan several times in a row and collects per-address statistics (see Scan statistics). Shows which luminaires disappear intermittently.":
+    "Запускает обычное сканирование несколько раз подряд и собирает статистику по адресам (см. «Статистика сканов»). Показывает, какие светильники периодически пропадают.",
+  "Runs a scan periodically while the tool is idle and adds it to the statistics. 0 turns auto-scan off. The interval is stored in the ESP32.":
+    "Периодически запускает сканирование, когда утилита свободна, и добавляет результат в статистику. 0 — выключено. Интервал хранится в ESP32.",
+
+  // commissioning
+  "Commissioning":"Адресация", "Find unaddressed":"Найти без адреса", "Assign unaddressed":"Назначить адреса",
+  "New SA":"Новый SA", "Readdress single connected":"Переадресовать единственный",
+  "Readdress single: leave exactly ONE physical luminaire connected to the DALI bus.":
+    "Переадресация единственного: на шине DALI должен остаться ровно ОДИН светильник.",
+  "Commissioning is the DALI process used to discover control gear and assign unique 6-bit short addresses (SA0…SA63).":
+    "Адресация (commissioning) — процедура DALI, которая находит устройства и назначает им уникальные 6-битные короткие адреса (SA0…SA63).",
+  "Unaddressed gear has no short address. This test enters commissioning for unaddressed gear only and checks whether any device responds to COMPARE.":
+    "У устройства без адреса нет короткого адреса. Тест запускает адресацию только для таких устройств и проверяет, отвечает ли кто-нибудь на COMPARE.",
+  "Runs commissioning only for gear without a short address, finds each 24-bit random address, then assigns the first free SA.":
+    "Запускает адресацию только для устройств без короткого адреса: находит 24-битный случайный адрес каждого и назначает первый свободный SA.",
+  "Short Address (SA) is the normal 6-bit DALI address of control gear. Valid values are 0…63.":
+    "Короткий адрес (SA) — обычный 6-битный адрес устройства DALI. Допустимы значения 0…63.",
+  "Use with exactly one physical luminaire connected. The tool initialises all gear, randomises it, finds the device and programs the requested new short address.":
+    "Используйте, когда подключён ровно один светильник. Утилита переводит все устройства в режим адресации, генерирует случайные адреса, находит устройство и записывает ему новый короткий адрес.",
+
+  // diagnostics
+  "Diagnostics":"Диагностика", "BUS PRESENCE TEST":"Проверка шины",
+  "INITIALISE 0xFF → RANDOMISE → SEARCHADDR FFFFFF → 20 raw COMPARE queries with NO REPLY / INVALID / COLLISION / YES statistics.":
+    "INITIALISE 0xFF → RANDOMISE → SEARCHADDR FFFFFF → 20 запросов COMPARE со статистикой NO REPLY / INVALID / COLLISION / YES.",
+  "Broadcasts QUERY CONTROL GEAR PRESENT and QUERY MISSING SHORT ADDRESS five times each. Every powered gear answers, with or without a short address. No answer at all means a bus power or wiring problem, not an addressing problem.":
+    "Пять раз отправляет всем QUERY CONTROL GEAR PRESENT и QUERY MISSING SHORT ADDRESS. Отвечает любое включённое устройство, с адресом или без. Если ответа нет совсем, проблема в питании шины или проводке, а не в адресации.",
+  "COMPARE is a commissioning query. Gear whose random address is at or below the current SEARCHADDR answers YES. Repeating it helps diagnose missing, invalid or colliding backward frames.":
+    "COMPARE — запрос адресации. Отвечает YES устройство, чей случайный адрес не больше текущего SEARCHADDR. Повторы помогают выявить пропущенные, искажённые или столкнувшиеся ответы.",
+  "Places selected DALI control gear into commissioning mode. 0xFF targets gear without a short address; 0x00 includes all gear.":
+    "Переводит устройства DALI в режим адресации. 0xFF — только устройства без короткого адреса, 0x00 — все устройства.",
+  "Makes each initialised gear generate a 24-bit random address used only during commissioning.":
+    "Каждое устройство в режиме адресации генерирует 24-битный случайный адрес, который используется только при адресации.",
+  "A 24-bit commissioning search value used with COMPARE to binary-search a device's random address.":
+    "24-битное значение поиска, с которым COMPARE двоичным поиском находит случайный адрес устройства.",
+  "Data Transfer Register 0: a temporary byte used by many DALI configuration commands.":
+    "Регистр передачи данных 0: временный байт, который используют многие команды настройки DALI.",
+
+  // danger zone
+  "Danger zone":"Опасная зона", "Clear selected address":"Стереть адрес", "Clear ALL addresses":"Стереть ВСЕ адреса",
+  "Recommission entire bus":"Переадресовать всю шину",
+  "These commands change DALI short addresses and may invalidate your existing device/group mapping.":
+    "Эти команды меняют короткие адреса DALI и могут нарушить существующую привязку устройств и групп.",
+  "Writes MASK (0xFF) to DTR0 and executes SET SHORT ADDRESS for the selected gear. The gear should become unaddressed.":
+    "Записывает MASK (0xFF) в DTR0 и выполняет SET SHORT ADDRESS для выбранного устройства. Устройство должно остаться без адреса.",
+  "Removes the short address from every responding SA. Use only when you intend to commission the whole bus again.":
+    "Стирает короткий адрес у всех отвечающих SA. Используйте, только если собираетесь заново адресовать всю шину.",
+  "Initialises and randomises all connected control gear, then assigns short addresses again from SA0 upward. Existing address mapping may change.":
+    "Переводит все подключённые устройства в режим адресации и заново назначает короткие адреса начиная с SA0. Текущая привязка адресов может измениться.",
+
+  // devices
+  "Devices":"Устройства", "Select all":"Выбрать все", "Clear selection":"Снять выбор",
+  "Selected ON":"Выбранные вкл", "Selected OFF":"Выбранные выкл", "BROADCAST ON":"Все вкл", "BROADCAST OFF":"Все выкл",
+  "Broadcast:":"Все:", "Selected:":"Выбрано:",
+  ". Selected ON/OFF sends addressed commands to checked devices. Broadcast sends one command to all gear and does not depend on short addresses.":
+    ". «Выбранные вкл/выкл» отправляет адресные команды отмеченным устройствам. «Все» отправляет одну команду всем устройствам и не зависит от коротких адресов.",
+  "Status":"Статус", "Level":"Уровень", "Type":"Тип", "Version":"Версия", "Groups":"Группы", "Control":"Управление",
+  "A DALI control gear is shown here when it responds to its short address. Group membership uses DALI groups 0…15.":
+    "Устройство DALI появляется здесь, когда отвечает на свой короткий адрес. Группы — группы DALI 0…15.",
+  "Broadcast is one DALI command addressed to all control gear on the bus. It does not require or use individual short addresses.":
+    "Broadcast — одна команда DALI сразу всем устройствам на шине. Короткие адреса для неё не нужны.",
+  "Broadcast brightness":"Яркость всех", "Broadcast colour temperature":"Цветовая температура всех",
+  "Broadcast brightness (Direct Arc Power Control) to all gear at once. DALI levels are logarithmic: 1 = 0.1%, 128 = 3.2%, 200 = 23%, 254 = 100%. 0 switches off.":
+    "Яркость сразу для всех устройств (Direct Arc Power Control). Уровни DALI логарифмические: 1 = 0,1%, 128 = 3,2%, 200 = 23%, 254 = 100%. 0 — выключить.",
+  "Broadcast colour temperature (DALI DT8) to all gear at once, cold on the left, warm on the right (6500–2700 K). Gear without DT8 ignores the command.":
+    "Цветовая температура сразу для всех (DALI DT8): слева холодный, справа тёплый (6500–2700 K). Устройства без DT8 игнорируют команду.",
+  "Short Address: 6-bit DALI address, 0…63.":"Короткий адрес: 6-битный адрес DALI, 0…63.",
+  "DALI control gear can belong to any of 16 groups, numbered 0…15.":"Устройство DALI может входить в любые из 16 групп с номерами 0…15.",
+  "Inspect":"Опросить", "Identify":"Мигнуть", "Off":"Выкл", "On":"Вкл", "Edit label":"Изменить подпись",
+  "Loads extended information for this device: configured levels, flags, device information, groups and scenes.":
+    "Загружает расширенные данные устройства: настроенные уровни, флаги, сведения об устройстве, группы и сцены.",
+  "Flashes this addressed luminaire three times so you can match its physical location to its short address.":
+    "Трижды мигает этим светильником, чтобы сопоставить его место установки с коротким адресом.",
+  "Brightness of this luminaire (Direct Arc Power Control). DALI levels are logarithmic: 1 = 0.1%, 128 = 3.2%, 200 = 23%, 254 = 100%. 0 switches off.":
+    "Яркость этого светильника (Direct Arc Power Control). Уровни DALI логарифмические: 1 = 0,1%, 128 = 3,2%, 200 = 23%, 254 = 100%. 0 — выключить.",
+  "Brightness SA{sa}":"Яркость SA{sa}", "Colour temperature SA{sa}":"Цветовая температура SA{sa}",
+  "Colour temperature (DALI DT8), cold on the left, warm on the right. The range is {range} K, {source}. Gear without DT8 ignores the command.":
+    "Цветовая температура (DALI DT8): слева холодный, справа тёплый. Диапазон {range} K, {source}. Устройства без DT8 игнорируют команду.",
+  "as reported by the gear":"по данным устройства",
+  "default; Inspect reads the real limits of DT8 gear":"по умолчанию; «Опросить» прочитает реальные пределы устройства DT8",
+
+  // status flags
+  "gear failure":"сбой драйвера", "lamp failure":"сбой лампы", "lamp on":"лампа вкл", "limit error":"вне пределов",
+  "fade running":"идёт переход", "reset state":"заводское сост.", "no short address":"нет адреса", "power cycle seen":"был сбой питания",
+
+  // device card
+  "Dimming test":"Тест яркости", "Tc test":"Тест Tc", "Identity":"Идентификация", "Read bank":"Прочитать банк", "Reset":"Сброс",
+  "Bank 1 (luminaire info)":"Банк 1 (данные светильника)", "Bank 202":"Банк 202", "Bank 203":"Банк 203", "Bank 204":"Банк 204",
+  "Bank 205":"Банк 205", "Bank 206":"Банк 206", "Bank 207":"Банк 207",
+  "Steps the level from minimum to maximum, waits for each fade to finish and compares QUERY ACTUAL LEVEL with the requested level. Restores the previous level.":
+    "Проходит уровни от минимума до максимума, ждёт окончания каждого перехода и сравнивает QUERY ACTUAL LEVEL с заданным уровнем. В конце возвращает прежний уровень.",
+  "Reads DT8 colour features and limits, steps the colour temperature from cold to warm and compares the reported value with the requested one. Restores the previous value.":
+    "Читает цветовые возможности и пределы DT8, проходит температуру от холодной к тёплой и сравнивает фактическое значение с заданным. В конце возвращает прежнее значение.",
+  "Reads memory bank 0: GTIN, firmware and hardware version, serial number, DALI part versions.":
+    "Читает банк памяти 0: GTIN, версии прошивки и железа, серийный номер, версии частей DALI.",
+  "Raw dump of a memory bank. D4i / DALI-2 drivers keep energy reporting and diagnostics (operating time, start counter, temperature, voltages, failures) in banks 202–207. Banks the gear does not implement are reported as not readable.":
+    "Сырой дамп банка памяти. Драйверы D4i / DALI-2 хранят в банках 202–207 энергопотребление и диагностику (наработку, число включений, температуру, напряжения, ошибки). Неподдерживаемые банки помечаются как нечитаемые.",
+  "DALI RESET: restores factory levels, fade, groups and scenes. The short address is kept.":
+    "DALI RESET: возвращает заводские уровни, переходы, группы и сцены. Короткий адрес сохраняется.",
+  "Settings":"Настройки", "Save settings":"Сохранить настройки", "Save groups":"Сохранить группы",
+  "Scenes":"Сцены", "Save scenes":"Сохранить сцены", "Recall scene {n}":"Вызвать сцену {n}",
+  "Level 0..254 stored per scene. Empty = MASK (luminaire is not part of the scene). ▶ recalls the scene on this luminaire only.":
+    "Уровень 0..254 для каждой сцены. Пусто = MASK (светильник не участвует в сцене). ▶ вызывает сцену только на этом светильнике.",
+  "Min level":"Мин. уровень", "Max level":"Макс. уровень", "Power-on":"При включении", "System failure":"При сбое шины",
+  "Fade time":"Время перехода", "Fade rate":"Скорость перехода",
+  "Lowest level the gear will dim to (not below physical minimum).":"Нижний уровень диммирования (не ниже физического минимума).",
+  "Highest level the gear will go to.":"Верхний уровень яркости.",
+  "Level after mains power is applied. 255 = MASK (last level).":"Уровень после подачи сетевого питания. 255 = MASK (последний уровень).",
+  "Level when the DALI bus is lost. 255 = MASK (no change).":"Уровень при пропадании шины DALI. 255 = MASK (без изменений).",
+  "0 = no fade, 1..15 = 0.7 s … 90.5 s.":"0 — без перехода, 1..15 — от 0,7 с до 90,5 с.",
+  "Steps per second for UP/DOWN commands: 1 = 358, 15 = 2.8.":"Шагов в секунду для команд UP/DOWN: 1 = 358, 15 = 2,8.",
+  "No extended data loaded. Click":"Расширенные данные не загружены. Нажмите", "to see and edit settings and scenes.":"чтобы увидеть и изменить настройки и сцены.",
+  "Actual level":"Текущий уровень", "Physical minimum":"Физический минимум", "Minimum level":"Минимальный уровень",
+  "Maximum level":"Максимальный уровень", "Power-on level":"Уровень при включении", "System failure level":"Уровень при сбое шины",
+  "Fade time / rate":"Время / скорость перехода", "Operating mode":"Режим работы", "Device type":"Тип устройства",
+  "Next device type":"Следующий тип устройства", "DALI version":"Версия DALI", "Light source type":"Тип источника света",
+  "Control gear failure":"Неисправность драйвера", "Lamp failure":"Неисправность лампы", "Lamp power on":"Лампа включена",
+  "Reset state":"Заводское состояние", "Power failure flag":"Флаг сбоя питания", "Colour temperature":"Цветовая температура",
+  "Tc coolest":"Tc самая холодная", "Tc warmest":"Tc самая тёплая", "time={t}, rate={r}":"время={t}, скорость={r}",
+
+  // group control, statistics
+  "Group / broadcast control":"Группа / все", "Broadcast":"Все", "Group {g}":"Группа {g}",
+  "Max":"Макс", "Min":"Мин", "Scene":"Сцена", "Recall":"Вызвать",
+  "Sends one command to every gear of a DALI group or to all gear (broadcast). Use it to check group membership and scenes.":
+    "Отправляет одну команду всем устройствам группы DALI или всем сразу. Помогает проверить состав групп и сцены.",
+  "Scan statistics":"Статистика сканов", "Rounds:":"Проходов:", "Reset statistics":"Сбросить статистику",
+  "Label":"Подпись", "Missed":"Пропуски", "No address has answered yet.":"Ни один адрес пока не ответил.",
+  "Collected over every scan since the last reset. OK = valid reply, INVALID / COLLISION = bus activity without a clean frame. A luminaire with OK below the number of rounds was missed in some scans.":
+    "Собирается по всем сканам с последнего сброса. OK — корректный ответ, INVALID / COLLISION — активность на шине без чистого кадра. Если OK меньше числа проходов, светильник пропадал в части сканов.",
+
+  // raw command & waveform
+  "Raw command & waveform":"Произвольная команда и сигнал", "Presets…":"Примеры…", "Frame (hex)":"Кадр (hex)",
+  "expect reply":"ждать ответ", "record waveform":"записать сигнал", "Send":"Отправить",
+  "4 hex digits = 16-bit frame (address byte + opcode), 6 digits = 24-bit frame. Examples: FF91 broadcast QUERY CONTROL GEAR PRESENT, 0190 QUERY STATUS of SA0, FE80 broadcast level 128.":
+    "4 hex-цифры — 16-битный кадр (байт адреса + код команды), 6 цифр — 24-битный кадр. Примеры: FF91 — QUERY CONTROL GEAR PRESENT для всех, 0190 — QUERY STATUS для SA0, FE80 — уровень 128 для всех.",
+  "No waveform recorded yet.":"Сигнал ещё не записан.", "Window":"Окно", "all":"весь", "Start":"Начало",
+  "samples":"отсчётов", "TX starts at":"TX начинается на", "bus activity outside TX:":"активность на шине вне TX:",
+  "low samples":"низких отсчётов", "no bus activity outside our transmission":"вне нашей передачи активности на шине нет",
+  "Sends any forward frame and optionally records the RX pin at 9600 samples/s. The shaded area is our own transmission; any low level after it is a reply from the gear.":
+    "Отправляет любой прямой кадр и при желании записывает линию RX с частотой 9600 отсчётов/с. Затенённая область — наша передача; низкий уровень после неё — ответ устройства.",
+  "Broadcast QUERY CONTROL GEAR PRESENT":"Все: QUERY CONTROL GEAR PRESENT", "Broadcast QUERY MISSING SHORT ADDRESS":"Все: QUERY MISSING SHORT ADDRESS",
+  "Broadcast OFF":"Все: OFF", "Broadcast RECALL MAX LEVEL":"Все: RECALL MAX LEVEL", "Broadcast level 128":"Все: уровень 128",
+
+  // bus monitor
+  "Bus monitor":"Монитор шины", "pause":"пауза", "only BUS frames":"только кадры BUS", "Clear":"Очистить",
+  "Time, ms":"Время, мс", "Δ, ms":"Δ, мс", "Kind":"Тип", "Frame":"Кадр", "Meaning":"Значение", "No frames yet.":"Кадров пока нет.",
+  "Every frame on the bus: TX = sent by this tool, REPLY = answer to our query, BUS = frame from another participant (another controller, sensor, push button) or a late reply. Time is when the frame was finished; Δ is the gap to the previous entry.":
+    "Все кадры на шине: TX — отправлены этой утилитой, REPLY — ответ на наш запрос, BUS — кадр другого участника (другой контроллер, датчик, кнопка) или запоздавший ответ. Время — момент окончания кадра; Δ — интервал до предыдущей записи.",
+  "reply 0x{v} ({d}){yes}":"ответ 0x{v} ({d}){yes}",
+  "collision (several gears answered or noise)":"коллизия (ответили несколько устройств или помеха)",
+  "invalid reply, {b} bit(s)":"искажённый ответ, бит: {b}", "undecodable bus activity":"нераспознанная активность на шине",
+  "24-bit frame (input devices / DALI-2 part 103)":"24-битный кадр (устройства ввода / DALI-2 часть 103)",
+  "backward frame 0x{v} (late or stray reply)":"обратный кадр 0x{v} (запоздавший или чужой ответ)",
+  "{b}-bit frame":"{b}-битный кадр", "{t}: level {v}":"{t}: уровень {v}", "special/reserved":"спец./резерв",
+
+  // memory
+  "Memory bank":"Банк памяти",
+  "Bank not readable: the gear did not answer or does not implement it.":"Банк не читается: устройство не ответило или не поддерживает его.",
+  "Decoded with the DALI-2 layout (IEC 62386-102 ed2). DALI-1 gear may use a different layout, check the raw dump.":
+    "Расшифровано по раскладке DALI-2 (IEC 62386-102 ed2). У устройств DALI-1 раскладка может отличаться, сверяйтесь с сырым дампом.",
+  "Byte 0 = last accessible location. Layout depends on the bank and manufacturer; D4i banks 202–207 hold energy and diagnostics data.":
+    "Байт 0 — адрес последней доступной ячейки. Раскладка зависит от банка и производителя; в банках D4i 202–207 хранятся данные энергопотребления и диагностики.",
+  "Firmware version":"Версия прошивки", "Identification number":"Идентификационный номер", "Hardware version":"Версия железа",
+  "IEC 62386-101 version":"Версия IEC 62386-101", "IEC 62386-102 version":"Версия IEC 62386-102", "IEC 62386-103 version":"Версия IEC 62386-103",
+  "Logical control gear units":"Логических устройств", "Last accessible memory bank":"Последний доступный банк",
+
+  // log
+  "Log":"Журнал", "Download log":"Скачать журнал", "Clear log":"Очистить журнал",
+
+  // dialogs
+  "SA must be between 0 and 63.":"SA должен быть от 0 до 63.",
+  "Is exactly ONE physical luminaire connected to the DALI bus?":"К шине DALI подключён ровно ОДИН светильник?",
+  "Clear short address SA{sa}? The gear will become unaddressed.":"Стереть короткий адрес SA{sa}? Устройство останется без адреса.",
+  "CLEAR the short address of ALL responding DALI control gear?":"СТЕРЕТЬ короткие адреса ВСЕХ отвечающих устройств DALI?",
+  "Type CLEAR to confirm:":"Введите CLEAR для подтверждения:",
+  "REASSIGN addresses for ALL connected DALI control gear?":"ПЕРЕНАЗНАЧИТЬ адреса ВСЕМ подключённым устройствам DALI?",
+  "Type READDRESS to confirm:":"Введите READDRESS для подтверждения:",
+  "Select at least one device first.":"Сначала выберите хотя бы одно устройство.",
+  "Label for SA{sa} (max 40 characters, empty to remove):":"Подпись для SA{sa} (до 40 символов, пусто — удалить):",
+  "RESET SA{sa}? Levels, fade, groups and scenes return to factory values. The short address is kept.":
+    "СБРОСИТЬ SA{sa}? Уровни, переходы, группы и сцены вернутся к заводским. Короткий адрес сохранится.",
+  "No scene changes.":"Сцены не изменены.", "Rounds must be 1..100.":"Число проходов: от 1 до 100.",
+  "Interval must be 0..1440 minutes.":"Интервал: от 0 до 1440 минут.", "Frame must be 4 or 6 hex digits.":"Кадр: 4 или 6 hex-цифр."
+};
+
+let lang = "";
+try { lang = localStorage.getItem("lang") || ""; } catch(e) {}
+if(lang!=="ru" && lang!=="en") lang = (navigator.language||"").toLowerCase().startsWith("ru") ? "ru" : "en";
+
+function tr(text, vars){
+  let s = (lang==="ru" && RU[text]!==undefined) ? RU[text] : text;
+  if(vars) s = s.replace(/\{(\w+)\}/g, (m,k) => (k in vars) ? vars[k] : m);
+  return s;
+}
+
+const I18N_ATTRS = ["data-tip","placeholder","title","aria-label"];
+const I18N_SKIP = "script,style,#log,#opText,#lastResult,.mono,.hexdump";
+const origText = new WeakMap();  // text node -> English source
+const origAttrs = new WeakMap(); // element -> {attribute: English source}
+
+function translateNode(node){
+  if(node.nodeType===3){
+    const parent = node.parentElement;
+    if(!parent || parent.closest(I18N_SKIP)) return;
+    let orig = origText.get(node);
+    if(orig===undefined){ orig = node.nodeValue; origText.set(node, orig); }
+    const key = orig.trim();
+    const value = key && RU[key]!==undefined ? orig.replace(key, tr(key)) : orig;
+    if(node.nodeValue!==value) node.nodeValue = value;
+    return;
+  }
+  if(node.nodeType!==1 || node.matches(I18N_SKIP)) return;
+  let saved = origAttrs.get(node);
+  for(const a of I18N_ATTRS){
+    if(!node.hasAttribute(a)) continue;
+    if(!saved){ saved = {}; origAttrs.set(node, saved); }
+    if(!(a in saved)) saved[a] = node.getAttribute(a);
+    const value = tr(saved[a]);
+    if(node.getAttribute(a)!==value) node.setAttribute(a, value);
+  }
+  for(const child of node.childNodes) translateNode(child);
+}
+
+function setLang(l){
+  lang = l==="ru" ? "ru" : "en";
+  try { localStorage.setItem("lang", lang); } catch(e) {}
+  document.documentElement.lang = lang;
+  document.getElementById("langSel").value = lang;
+  translateNode(document.body);
+  // parts built with tr() and inserted values are rebuilt
+  if(typeof initTargets==="function"){ initTargets(); initPresets(); }
+  if(typeof rowCache!=="undefined"){
+    for(const c of rowCache.values()){ c.tr.remove(); c.detail.remove(); }
+    rowCache.clear();
+    renderDevices(lastDevices);
+    renderMonitor();
+  }
+}
+
 let lastLog = "";
 let lastDevices = [];
 const selectedSAs = new Set();
@@ -387,27 +650,27 @@ async function start(url) {
 
 function readdress(){
   const sa = Number(document.getElementById("newSa").value);
-  if(sa<0||sa>63) return alert("SA must be between 0 and 63.");
-  if(!confirm("Is exactly ONE physical luminaire connected to the DALI bus?")) return;
+  if(sa<0||sa>63) return alert(tr("SA must be between 0 and 63."));
+  if(!confirm(tr("Is exactly ONE physical luminaire connected to the DALI bus?"))) return;
   start("/api/readdress?sa="+sa);
 }
 
 function clearOne(){
   const sa = Number(document.getElementById("clearSa").value);
-  if(sa<0||sa>63) return alert("SA must be between 0 and 63.");
-  if(!confirm("Clear short address SA"+sa+"? The gear will become unaddressed.")) return;
+  if(sa<0||sa>63) return alert(tr("SA must be between 0 and 63."));
+  if(!confirm(tr("Clear short address SA{sa}? The gear will become unaddressed.", {sa}))) return;
   start("/api/clear-address?sa="+sa);
 }
 
 function clearAll(){
-  if(!confirm("CLEAR the short address of ALL responding DALI control gear?")) return;
-  if(prompt('Type CLEAR to confirm:') !== 'CLEAR') return;
+  if(!confirm(tr("CLEAR the short address of ALL responding DALI control gear?"))) return;
+  if(prompt(tr("Type CLEAR to confirm:")) !== 'CLEAR') return;
   start("/api/clear-all?confirm=CLEAR");
 }
 
 function recommissionAll(){
-  if(!confirm("REASSIGN addresses for ALL connected DALI control gear?")) return;
-  if(prompt('Type READDRESS to confirm:') !== 'READDRESS') return;
+  if(!confirm(tr("REASSIGN addresses for ALL connected DALI control gear?"))) return;
+  if(prompt(tr("Type READDRESS to confirm:")) !== 'READDRESS') return;
   start("/api/recommission-all?confirm=READDRESS");
 }
 
@@ -443,7 +706,7 @@ function clearSelection(){
 
 function selectedAction(cmd){
   const sas = [...selectedSAs].sort((a,b)=>a-b);
-  if(!sas.length) return alert("Select at least one device first.");
+  if(!sas.length) return alert(tr("Select at least one device first."));
   start("/api/selected?cmd="+cmd+"&sas="+encodeURIComponent(sas.join(",")));
 }
 
@@ -502,7 +765,7 @@ function fadeText(v){
   if(v===null || v===undefined || v<0) return "—";
   const fadeRate=v & 0x0F;
   const fadeTime=(v >> 4) & 0x0F;
-  return `${hexByte(v)} · time=${fadeTime}, rate=${fadeRate}`;
+  return `${hexByte(v)} · ${tr("time={t}, rate={r}", {t:fadeTime, r:fadeRate})}`;
 }
 
 function sceneHtml(scenes){
@@ -580,7 +843,7 @@ function scenesForm(d){
     const orig = v===255 ? "mask" : (v<0 ? "" : String(v));
     cells+=`<label>S${i}
       <input id="scn${d.sa}_${i}" data-orig="${orig}" value="${shown}" placeholder="${v===255?"mask":"—"}">
-      <button class="op" title="Recall scene ${i}" onclick="sceneRecall(${d.sa},${i})">▶</button></label>`;
+      <button class="op" title="${tr("Recall scene {n}", {n:i})}" onclick="sceneRecall(${d.sa},${i})">▶</button></label>`;
   });
   return `<div class="sub-h">Scenes <span class="help" data-tip="Level 0..254 stored per scene. Empty = MASK (luminaire is not part of the scene). ▶ recalls the scene on this luminaire only.">?</span></div>
     <div class="scene-grid">${cells}</div>
@@ -665,7 +928,7 @@ function levelControl(d){
   let l = levelValues.has(d.sa) ? levelValues.get(d.sa) : ((d.level>=0 && d.level<=254) ? d.level : 0);
   return `<span class="tc lvl">
       <input class="op lvl-slider" data-sa="${d.sa}" type="range" min="0" max="254" value="${l}"
-        aria-label="Brightness SA${d.sa}"
+        aria-label="${tr("Brightness SA{sa}", {sa:d.sa})}"
         onpointerdown="sliderDragging=true"
         oninput="levelInput(${d.sa},this)"
         onchange="levelCommit(${d.sa},this)">
@@ -710,12 +973,14 @@ function tcControl(d){
   m = Math.min(warm, Math.max(cool, m));
   return `<span class="tc">
       <input class="op tc-slider" data-sa="${d.sa}" type="range" min="${cool}" max="${warm}" value="${m}"
-        aria-label="Colour temperature SA${d.sa}"
+        aria-label="${tr("Colour temperature SA{sa}", {sa:d.sa})}"
         onpointerdown="sliderDragging=true"
         oninput="tcInput(${d.sa},this)"
         onchange="tcCommit(${d.sa},this)">
       <span class="tc-k" id="tcLabel${d.sa}">${kelvin(m)} K</span>
-      <span class="help" data-tip="Colour temperature (DALI DT8), cold on the left, warm on the right. The range is ${kelvin(cool)}–${kelvin(warm)} K${validMirek(d.tcCoolest) ? " as reported by the gear" : " by default; Inspect reads the real limits of DT8 gear"}. Gear without DT8 ignores the command.">?</span>
+      <span class="help" data-tip="${tr("Colour temperature (DALI DT8), cold on the left, warm on the right. The range is {range} K, {source}. Gear without DT8 ignores the command.", {
+        range: `${kelvin(cool)}–${kelvin(warm)}`,
+        source: tr(validMirek(d.tcCoolest) ? "as reported by the gear" : "default; Inspect reads the real limits of DT8 gear")})}">?</span>
     </span>`;
 }
 
@@ -831,7 +1096,7 @@ function escapeHtml(t){
 
 async function editLabel(sa){
   const cur = (lastDevices.find(d=>d.sa===sa)||{}).label || "";
-  const text = prompt("Label for SA"+sa+" (max 40 characters, empty to remove):", cur);
+  const text = prompt(tr("Label for SA{sa} (max 40 characters, empty to remove):", {sa}), cur);
   if(text===null) return;
   try{
     await api("/api/label?sa="+sa+"&text="+encodeURIComponent(text), {method:"POST"});
@@ -844,7 +1109,7 @@ function readMemory(sa, bank){
 }
 
 function resetDevice(sa){
-  if(!confirm("RESET SA"+sa+"? Levels, fade, groups and scenes return to factory values. The short address is kept.")) return;
+  if(!confirm(tr("RESET SA{sa}? Levels, fade, groups and scenes return to factory values. The short address is kept.", {sa}))) return;
   deviceAction(sa,'reset');
 }
 
@@ -869,7 +1134,7 @@ function saveScenes(sa){
     q+=`&s${i}=${encodeURIComponent(now)}`;
     n++;
   }
-  if(!n) return alert("No scene changes.");
+  if(!n) return alert(tr("No scene changes."));
   start(`/api/device?sa=${sa}&cmd=scenes${q}`);
 }
 
@@ -878,13 +1143,17 @@ function sceneRecall(sa, n){
 }
 
 // ---------- Group / broadcast control ----------
-(function initTargets(){
+function initTargets(){
   const t=document.getElementById("tgtAdr");
-  t.innerHTML = `<option value="127">Broadcast</option>` +
-    Array.from({length:16},(_,g)=>`<option value="${64+g}">Group ${g}</option>`).join("");
-  document.getElementById("tgtScene").innerHTML =
-    Array.from({length:16},(_,n)=>`<option value="${n}">${n}</option>`).join("");
-})();
+  const selected=t.value || "127";
+  t.innerHTML = `<option value="127">${tr("Broadcast")}</option>` +
+    Array.from({length:16},(_,g)=>`<option value="${64+g}">${tr("Group {g}", {g})}</option>`).join("");
+  t.value=selected;
+  const sc=document.getElementById("tgtScene");
+  if(!sc.options.length)
+    sc.innerHTML = Array.from({length:16},(_,n)=>`<option value="${n}">${n}</option>`).join("");
+}
+initTargets();
 
 function targetAction(action){
   const adr=document.getElementById("tgtAdr").value;
@@ -897,7 +1166,7 @@ function targetAction(action){
 // ---------- Scan statistics / auto-scan ----------
 function scanRounds(){
   const n=Number(document.getElementById("scanRounds").value);
-  if(!(n>=1 && n<=100)) return alert("Rounds must be 1..100.");
+  if(!(n>=1 && n<=100)) return alert(tr("Rounds must be 1..100."));
   start("/api/scan-rounds?rounds="+n);
 }
 
@@ -906,7 +1175,7 @@ document.getElementById("autoScan").addEventListener("input", ()=>{ autoScanEdit
 
 async function setAutoScan(){
   const m=Number(document.getElementById("autoScan").value);
-  if(!(m>=0 && m<=1440)) return alert("Interval must be 0..1440 minutes.");
+  if(!(m>=0 && m<=1440)) return alert(tr("Interval must be 0..1440 minutes."));
   try{ await api("/api/autoscan?minutes="+m,{method:"POST"}); autoScanEdited=false; refresh(); }
   catch(e){ alert(e.message); }
 }
@@ -939,10 +1208,11 @@ const RAW_PRESETS = [
   ["FF05", false, "Broadcast RECALL MAX LEVEL"],
   ["FE80", false, "Broadcast level 128"],
 ];
-(function initPresets(){
-  document.getElementById("rawPreset").innerHTML = `<option value="">Presets…</option>` +
-    RAW_PRESETS.map((p,i)=>`<option value="${i}">${p[0]} · ${p[2]}</option>`).join("");
-})();
+function initPresets(){
+  document.getElementById("rawPreset").innerHTML = `<option value="">${tr("Presets…")}</option>` +
+    RAW_PRESETS.map((p,i)=>`<option value="${i}">${p[0]} · ${tr(p[2])}</option>`).join("");
+}
+initPresets();
 
 function applyPreset(){
   const sel=document.getElementById("rawPreset");
@@ -955,7 +1225,7 @@ function applyPreset(){
 
 function sendRaw(){
   const frame=document.getElementById("rawFrame").value.replace(/\s+/g,"");
-  if(!/^([0-9a-fA-F]{4}|[0-9a-fA-F]{6})$/.test(frame)) return alert("Frame must be 4 or 6 hex digits.");
+  if(!/^([0-9a-fA-F]{4}|[0-9a-fA-F]{6})$/.test(frame)) return alert(tr("Frame must be 4 or 6 hex digits."));
   const reply=document.getElementById("rawReply").checked ? 1 : 0;
   const repeat=Number(document.getElementById("rawRepeat").value)||1;
   const capture=document.getElementById("rawCapture").checked ? document.getElementById("rawSamples").value : 0;
@@ -980,10 +1250,11 @@ async function loadScope(){
   // low samples outside our own transmission = activity of other bus participants
   let lowOutside=0;
   bits.forEach((b,i)=>{ if(!b && !(scope.txStart<0xFFFF && i>=scope.txStart && i<=(scope.txEnd<0xFFFF?scope.txEnd:scope.samples))) lowOutside++; });
-  const txMs = scope.txStart<0xFFFF ? (scope.txStart*1000/scope.rate).toFixed(1)+" ms" : "—";
+  // static pieces in their own elements so the language switch can translate them
+  const txText = scope.txStart<0xFFFF ? `${(scope.txStart*1000/scope.rate).toFixed(1)} <span>ms</span>` : "—";
   document.getElementById("scopeInfo").innerHTML =
-    `<b>${escapeHtml(scope.title)}</b> · ${scope.samples} samples (${ms.toFixed(0)} ms) · TX starts at ${txMs} · ` +
-    (lowOutside ? `<span class="ok">bus activity outside TX: ${lowOutside} low samples (${(lowOutside*1000/scope.rate).toFixed(1)} ms)</span>`
+    `<b>${escapeHtml(scope.title)}</b> · ${scope.samples} <span>samples</span> (${ms.toFixed(0)} <span>ms</span>) · <span>TX starts at</span> ${txText} · ` +
+    (lowOutside ? `<span class="ok"><span>bus activity outside TX:</span> ${lowOutside} <span>low samples</span> (${(lowOutside*1000/scope.rate).toFixed(1)} <span>ms</span>)</span>`
                 : `<span class="bad">no bus activity outside our transmission</span>`);
   drawScope();
 }
@@ -1075,8 +1346,8 @@ function decodeForward(b0,b1){
   else if((b0&0xE0)===0x80) target="G"+((b0>>1)&15);
   else if(b0>=0xFE) target="BROADCAST";
   else if(b0===0xFC || b0===0xFD) target="BROADCAST UNADDRESSED";
-  else return "special/reserved";
-  return (b0&1) ? `${target}: ${cmdName(b1)}` : `${target}: level ${b1}`;
+  else return tr("special/reserved");
+  return (b0&1) ? `${target}: ${cmdName(b1)}` : tr("{t}: level {v}", {t:target, v:b1});
 }
 
 function hex2(v){ return Number(v).toString(16).padStart(2,"0").toUpperCase(); }
@@ -1084,15 +1355,15 @@ function hex2(v){ return Number(v).toString(16).padStart(2,"0").toUpperCase(); }
 function traceMeaning(e){
   const bytes=(e.d.match(/../g)||[]).map(h=>parseInt(h,16));
   if(e.k===1){
-    if(e.rv>=0) return `reply 0x${hex2(e.rv)} (${e.rv})${e.rv===255?" = YES":""}`;
-    if(e.rv===-3) return "collision (several gears answered or noise)";
-    return `invalid reply, ${e.b} bit(s)`;
+    if(e.rv>=0) return tr("reply 0x{v} ({d}){yes}", {v:hex2(e.rv), d:e.rv, yes:e.rv===255?" = YES":""});
+    if(e.rv===-3) return tr("collision (several gears answered or noise)");
+    return tr("invalid reply, {b} bit(s)", {b:e.b});
   }
-  if(e.k===3) return "undecodable bus activity";
+  if(e.k===3) return tr("undecodable bus activity");
   if(e.b===16) return decodeForward(bytes[0],bytes[1]);
-  if(e.b===24) return "24-bit frame (input devices / DALI-2 part 103)";
-  if(e.b===8) return `backward frame 0x${hex2(bytes[0])} (late or stray reply)`;
-  return `${e.b}-bit frame`;
+  if(e.b===24) return tr("24-bit frame (input devices / DALI-2 part 103)");
+  if(e.b===8) return tr("backward frame 0x{v} (late or stray reply)", {v:hex2(bytes[0])});
+  return tr("{b}-bit frame", {b:e.b});
 }
 
 const KIND = {0:["TX","k-tx"],1:["REPLY","k-reply"],2:["BUS","k-foreign"],3:["BUS ERR","k-err"]};
@@ -1163,7 +1434,7 @@ async function loadMemory(){
   const m=await api("/api/memory");
   const card=document.getElementById("memCard");
   card.style.display="block";
-  document.getElementById("memTitle").textContent=`Memory bank ${m.bank} · SA${m.sa}`;
+  document.getElementById("memTitle").innerHTML=`<span>Memory bank</span> ${m.bank} · SA${m.sa}`;
   if(!m.bytes.length){
     document.getElementById("memDecoded").innerHTML=`<span class="bad">Bank not readable: the gear did not answer or does not implement it.</span>`;
     document.getElementById("memDump").textContent="";
@@ -1198,7 +1469,9 @@ async function refresh(){
     if(!sliderDragging) renderDevices(s.devices);
     renderStats(s);
     document.getElementById("scanDiff").textContent=s.scanDiff||"—";
-    document.getElementById("autoScanState").textContent = s.autoScan ? `active, every ${s.autoScan} min` : "off";
+    const autoHtml = s.autoScan ? `<span>active, every</span> ${s.autoScan} <span>min</span>` : `<span>off</span>`;
+    const autoEl = document.getElementById("autoScanState");
+    if(autoEl.dataset.html!==autoHtml){ autoEl.dataset.html=autoHtml; autoEl.innerHTML=autoHtml; }
     if(!autoScanEdited && document.activeElement!==document.getElementById("autoScan"))
       document.getElementById("autoScan").value=s.autoScan;
     if(s.traceSeq!==monSeq) pollTrace().catch(()=>{});
@@ -1213,9 +1486,14 @@ async function refresh(){
     }
     document.querySelectorAll(".op").forEach(b=>b.disabled=s.busy);
   }catch(e){
-    document.getElementById("opText").textContent="Connection error: "+e.message;
+    document.getElementById("opText").textContent=tr("Connection error:")+" "+e.message;
   }
 }
+
+new MutationObserver(muts => {
+  for(const m of muts) for(const n of m.addedNodes) translateNode(n);
+}).observe(document.body, {childList:true, subtree:true});
+setLang(lang);
 
 refresh();
 setInterval(refresh,800);
